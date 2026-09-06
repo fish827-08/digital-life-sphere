@@ -40,17 +40,18 @@
 | 2026-09-07 | 模块三 3.5：sim_core/src/consume.rs | 进食结算下沉 Rust：先数每格几只再算每只实吃量（同格均分、绝不欠账），按原序逐只扣减，与 numpy `consume_many` 逐位等价；lib.rs 绑定加长度+越界校验；引擎进食/邻格觅食双路径接入；函数级对拍 8 例 + 引擎级 4 例，全量 pytest 30 例通过 |
 | 2026-09-07 | 预计算邻居表优化（world/sphere_world.py） | 构造时一次性算好全网格邻居表 `_nb_table`(7200,8) + `_pole_nb`(2,120)，`neighbors()` 改查表返回；引擎移动/觅食两处调用点零改动，行为零变化（新 tests/test_sphere_world.py 全网格 vs 旧算法逐位对拍）；基准 3.030/3.049s → 0.615/0.569s ≈ 5x，全量 pytest 34 例通过 |
 | 2026-09-07 | 模块四：observatory 适配 + 快照桥（✅） | traits（14 基因位+3 派生，统计口径与引擎同公式）/ statistics（数组化聚合，直接读引擎 SoA 数组）/ observer（世代+节拍双触发器）/ experiment（嵌套 SimConfig + overrides 合并 + SphereEngine runner，run_single 每 tick 对齐终止条件置位）/ __main__ CLI（--rows/--cols/--sim-core）/ persistence/io（manifest+generations 落盘）；快照桥 broker：每 100 tick 采 JSON 快照（含个体明细广播），WebSocket 推流，环形只有标量防 OOM，新客户端连上补发最新快照；pytest 全量 50 例通过（新增 16 例）|
+| 2026-09-07 | 提交并推送模块三、四到 GitHub（origin/main） | 提交：3ed6fd0（模块三）/ 8aefe06（模块四）；`git push origin main` 后本地与远端同步 | GitHub 远端 `fish827-08/digital-life-sphere`（SSH）为唯一备份，推送后 3 个提交（模块二收尾~模块四）全部上云 |
 
 ## 进行中
-- 模块四已完成（observatory 适配 + 快照桥），待审阅/提交后进入模块五前端渲染层
+- 模块四已完成并通过审阅、已提交推送（8aefe06）；下一步进入模块五（前端渲染层：消费快照桥 WebSocket 流）
 
 ## 待办事项
 1. 模块一 SphereWorld 开发（✅ 已完成）
 2. 模块二 引擎核心（✅ config/tick/lifecycle/engine 完成，基因扩充 g0~g13 完成）
 3. 模块二 收尾：pytest 用例固化（✅ tests 7 例通过）+ observatory 快速长程验证（✅）
-4. 模块三 Rust 热核 Sim-core
-5. 模块四 observatory 适配 + 快照桥
-6. 模块五 前端渲染层
+4. 模块三 Rust 热核 Sim-core（✅ 3.1~3.5 + 邻居表优化，已提交 3ed6fd0）
+5. 模块四 observatory 适配 + 快照桥（✅ 已提交 8aefe06 并推送远端）
+6. 模块五 前端渲染层（未开始）
 
 ## 问题与决策记录
 | 日期 | 问题 | 决策 | 原因 |
