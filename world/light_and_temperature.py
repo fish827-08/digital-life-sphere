@@ -1,0 +1,270 @@
+"""LightAndTemperature：球面世界的光照与温度场（模块一 · 文件 2）。
+
+模块职责
+--------
+承接文件 1（SphereWorld 拓扑）的空间框架，加入"环境能量"维度：
+- 光照：固定太阳 + 世界自转 → 昼夜在经度方向扫掠；
+- 温度：由纬度（基温分布）与光照（昼夜微调）共同决定；
+- 活性（activity）：温度 → 生物行为的速率/能耗因子（供引擎使用）。
+
+关键设计（前期做简，不引入季节倾角）
+-----------------------------------
+- 太阳视为固定在空间中的一个方向（经度 λ_sun），世界整体绕极轴
+  自转，时间推进即"太阳子午线"在经度上扫掠 → 产生昼夜；
+- 单格光照 = cos(纬度) × max(0, cos(经度差))：
+  赤道正午光照=1；极地无论昼夜光照都趋近 0（天然近似极夜/极昼）；
+- 温度 = 纬度基温 + 光照×昼夜温差。昼夜温差刻意设小（夜晚只比白天
+  低一点），极地永远冷；
+- activity = 温度的函数：温度偏低时生物移动/发育变慢、能耗升高
+  （具体倍率映射见 methods）。
+
+坐标/时间约定
+-------------
+- flat : 平铺索引（同 SphereWorld，行优先 row*cols+col）；
+- tick : 整数时间步。tick % rotation_period 决定太阳子午线经度。
+"""
+from __future__ import annotations
+
+import numpy as np
+from numpy.typing import NDArray
+
+from world.sphere_world import SphereWorld
+
+
+class LightAndTemperature:
+    """球面光照温度场（依赖 SphereWorld 的拓扑与经度环绕语义）。
+
+    实例属性（__slots__ 声明的全部字段）说明
+    ---------------------------------------
+    world : SphereWorld
+        所属网格（拓扑来源：rows/cols、纬度、flat↔rc）。
+    rotation_period : int
+        世界自转一圈需要的 tick 数（昼夜一整个周期）。
+    tilt_rad : float
+        黄道倾角（弧度）。本阶段固定为 0（不做四季），保留字段仅为
+        未来扩展，不影响当前计算。
+    lat_base_ref : float
+        参考光照基准：cos(纬度) 的指数（=1 时线性，
+        调大可让极地更冷，见 illumination()）。
+    t_equator : float
+        赤道（纬度=0）的基温（抽象温度单位）。
+    t_pole : float
+        极点（|纬度|=90°）的基温（恒低温）。
+    day_boost : float
+        昼夜温差幅度：温度 = 基温 + 光照 × day_boost。
+        刻意取小 → 夜晚只比白天冷一点。
+    _daily_cos : NDArray[float64], 形状 (cols,)
+        日变化系数预计算表：cos(经度差) 的原始值所在经度区间，
+        见 illumination()。缓存避免每 tick 重复建表。
+    """
+
+    __slots__ = (
+        "world",
+        "rotation_period",
+        "tilt_rad",
+        "lat_base_ref",
+        "t_equator",
+        "t_pole",
+        "day_boost",
+        "_daily_cos",
+    )
+
+    def __init__(
+        self,
+        world: SphereWorld,
+        rotation_period: int = 2400,
+        t_equator: float = 30.0,
+        t_pole: float = -20.0,
+        day_boost: float = 6.0,
+        lat_base_ref: float = 1.0,
+    ) -> None:
+        """构造光照温度场。
+
+        参数
+        ----
+        world : SphereWorld
+            网格拓扑对象（必须先构造，作为本场的位置编码来源）。
+        rotation_period : int, 默认 2400
+            自转一圈的 tick 数。2400 tick 一圈 = 昼夜各 1200 tick。
+            决定"太阳子午线"扫掠速度。
+        t_equator : float, 默认 30.0
+            赤道基温（抽象单位，可不视为现实摄氏温度）。
+        t_pole : float, 默认 -20.0
+            极点基温（极地恒冷，与赤道形成纬度梯度）。
+        day_boost : float, 默认 6.0
+            昼夜温差幅度：正午比同纬度夜晚高 6 个单位。
+            刻意小 → "夜晚只比白天冷一点"。
+        lat_base_ref : float, 默认 1.0
+            光照对纬度的敏感指数。越大极地光照衰减越快（极地更冷）。
+
+        返回
+        ----
+        None。构造完成后即可调用查询方法。
+        """
+        self.world = world
+        self.rotation_period = int(rotation_period)
+        self.tilt_rad = 0.0  # 阶段 2 前固定无季节
+        self.lat_base_ref = float(lat_base_ref)
+        self.t_equator = float(t_equator)
+        self.t_pole = float(t_pole)
+        self.day_boost = float(day_boost)
+        # 日变化预计算：经度差 ∈ [-π, π)，cos 为此时各地相对太阳的角度
+        col_rad = np.linspace(0.0, 2.0 * np.pi, self.world.cols, endpoint=False)
+        # 经度差从 0（对太阳）向 π 变化，cos → 光照衰减（后面按 tick 平移）
+        self._daily_cos = np.cos(col_rad)
+
+    # ---- 光照 --------------------------------------------------------------
+
+    def sun_longitude(self, tick: int) -> float:
+        """计算给定 tick 时刻太阳子午线所在经度（弧度，0..2π）。
+
+        参数
+        ----
+        tick : int
+            当前时间步（可为任意非负整数，内部对周期取模）。
+
+        返回
+        ----
+        float : 太阳子午线经度（弧度，范围 [0, 2π)）。
+        """
+        phase = (tick % self.rotation_period) / self.rotation_period
+        return phase * 2.0 * np.pi
+
+    def illumination(self, flat, tick: int) -> np.ndarray:
+        """计算格子光照强度（0=全黑，1=正午对日）。
+
+        光照 = cos(纬度)^lat_base_ref × max(0, cos(经度差))。
+        - 纬度项：赤道最大、极地→0（极地天然近极夜，昼夜差异小）；
+        - 经度项：格子经度与太阳子午线越接近照度越高，
+          背对太阳（经度差>90°）被截断为 0 → 产生日落后的黑夜。
+
+        参数
+        ----
+        flat : int 或 NDArray[int64]
+            平铺索引（支持标量或数组批量查询）。
+        tick : int
+            当前时间步（决定太阳子午线位置）。
+
+        返回
+        ----
+        NDArray[float64] : 与入参同形状的光照强度，范围 [0, 1]。
+        """
+        flat = np.asarray(flat, dtype=np.int64)
+        scalar = flat.ndim == 0
+        flat = flat.reshape(-1)
+        rows, cols = self.world.flat_to_rc(flat)
+
+        # 纬度项（极地弱）
+        cos_lat = np.cos(self.world.latitude_of(rows))
+        lat_term = np.power(cos_lat, self.lat_base_ref)  # 形状 (N,)
+
+        # 经度项（昼夜）：太阳子午线经度 - 本格经度，cos 光照
+        sun_lon = self.sun_longitude(tick)
+        col_rad = cols / self.world.cols * (2.0 * np.pi)  # 本格经度（弧度）
+        lon_diff = col_rad - sun_lon
+        # 对齐到 [-π, π) 使 cos 单调衰减
+        lon_diff = (lon_diff + np.pi) % (2.0 * np.pi) - np.pi
+        day_term = np.maximum(0.0, np.cos(lon_diff))  # 反面截断为 0 → 夜
+
+        out = np.asarray(lat_term * day_term)
+        return out.item(0) if scalar else out
+
+    # ---- 温度 --------------------------------------------------------------
+
+    def base_temperature(self, flat) -> np.ndarray:
+        """计算纬度基温（无昼夜影响，仅随纬度变化）。
+
+        基温 = t_pole + (t_equator - t_pole) × cos(纬度)。
+        赤道 → t_equator；极点 → t_pole；单调递减，无拐点。
+
+        参数
+        ----
+        flat : int 或 NDArray[int64]
+            平铺索引（支持标量或数组批量查询）。
+
+        返回
+        ----
+        NDArray[float64] : 与入参同形状的基温（抽象温度单位）。
+        """
+        flat = np.asarray(flat, dtype=np.int64)
+        scalar = flat.ndim == 0
+        flat = flat.reshape(-1)
+        rows, _ = self.world.flat_to_rc(flat)
+        cos_lat = np.cos(self.world.latitude_of(rows))
+        out = np.asarray(self.t_pole + (self.t_equator - self.t_pole) * cos_lat)
+        return out.item(0) if scalar else out
+
+    def temperature(self, flat, tick: int) -> np.ndarray:
+        """计算当前时刻的实时温度（基温 + 昼夜微调）。
+
+        实时温度 = 基温 + 光照 × day_boost。
+        昼夜项随光照正比：正午最高（基温+day_boost），深夜最低（≈基温，
+        因光照被截断为 0）。因 day_boost 取小，夜晚只比白天低一点。
+
+        参数
+        ----
+        flat : int 或 NDArray[int64]
+            平铺索引（支持标量或数组批量查询）。
+        tick : int
+            当前时间步（决定光照 → 昼夜温差项）。
+
+        返回
+        ----
+        NDArray[float64] : 与入参同形状的实时温度。
+        """
+        flat = np.asarray(flat, dtype=np.int64)
+        scalar = flat.ndim == 0
+        flat = flat.reshape(-1)
+        base = self.base_temperature(flat)
+        illum = self.illumination(flat, tick)
+        out = np.asarray(base) + np.asarray(illum) * self.day_boost
+        return out.item(0) if scalar else out
+
+    # ---- 活性（生物响应） ---------------------------------------------------
+
+    def activity_factor(self, flat, tick: int) -> np.ndarray:
+        """计算温度 → 生物行为活性因子（范围 0..1，温度越高活性越高）。
+
+        活性 = clip((T - t_min) / (t_ref - t_min), 0, 1)。
+        - 温度 ≥ t_ref（默认 10°）→ 活性 1（正常行动）；
+        - 温度 ≤ t_min（默认 -10°）→ 活性 0（近乎停滞）；
+        - 中间线性过渡。极地因温度低活性低 → 移动/发育慢、
+          单位行动能耗更高（能耗反向，见引擎用法）。
+
+        参数
+        ----
+        flat : int 或 NDArray[int64]
+            平铺索引（支持标量或数组批量查询）。
+        tick : int
+            当前时间步（温度随时间变化，活性随之变化）。
+
+        返回
+        ----
+        NDArray[float64] : 与入参同形状的活性因子，范围 [0, 1]。
+        """
+        t = self.temperature(flat, tick)
+        t_min, t_ref = -10.0, 10.0
+        out = np.asarray(t)
+        out = np.clip((out - t_min) / (t_ref - t_min), 0.0, 1.0)
+        return out.item(0) if out.ndim == 0 else out
+
+    # ---- 调试 / 展示 -------------------------------------------------------
+
+    def __repr__(self) -> str:
+        """生成对象的人类可读字符串。
+
+        参数
+        ----
+        无。
+
+        返回
+        ----
+        str : 例如
+            "LightAndTemperature(rotation=2400, equator=30, pole=-20,
+            day_boost=6)"
+        """
+        return (
+            f"LightAndTemperature(rotation={self.rotation_period}, "
+            f"equator={self.t_equator}, pole={self.t_pole}, "
+            f"day_boost={self.day_boost})"
+        )

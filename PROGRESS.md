@@ -3,7 +3,7 @@
 ## 项目概况
 - 项目名称：digital-life-sphere
 - 启动日期：2026-09-06
-- 当前阶段：架构设计已确认，准备进入模块一开发
+- 当前阶段：模块一（球面世界）完成，准备进入模块二（引擎层）
 
 ## 总体进度
 - [x] 拷贝 AI-CODE-DEVELOPMENT-RULES.md 到项目根目录
@@ -12,7 +12,8 @@
 - [x] 确认项目总体方案
 - [x] 设计整体架构，AI 提草案并与我逐项确认
 - [x] 创建 PROJECT-DESCRIPTION.md（功能描述文档，含目录，v0.5 定稿）
-- [ ] 模块一开发（SphereWorld 世界模块）
+- [x] 再创建 MODULES.md（模块实现说明：每个文件/类/方法的通俗解释）
+- [x] 模块一开发（SphereWorld 世界模块）——3 个文件全部完成并验证
 - [ ] 模块二开发（VecEngine 适配球面）
 - [ ] 模块三开发（Rust 加速核 Sim-core）
 - [ ] 模块四开发（observatory 适配 + 快照桥）
@@ -23,13 +24,17 @@
 |------|----------|------|
 | 2026-09-06 | 初始化项目目录 | 名称 digital-life-sphere，位于 the-world 内部子目录 |
 | 2026-09-06 | 复制 AI-CODE-DEVELOPMENT-RULES.md 并加入 .gitignore | 遵循记忆中的文档要求 |
+| 2026-09-06 | 模块一：world/sphere_world.py | 土地拓扑：经纬网格 60×120、极点坍缩、面积梯度、8 邻 |
+| 2026-09-06 | 模块一：world/light_and_temperature.py | 天气：固定太阳+自转（昼夜扫掠）、纬度基温+小温差、活性因子 |
+| 2026-09-06 | 模块一：world/resource_field.py | 食物：容量随面积、再生随温度（同格多只均分不欠账） |
+| 2026-09-06 | 创建 MODULES.md | 收录模块一全部类与方法的通俗解释、测试点 |
 
 ## 进行中
-- 模块一（SphereWorld 世界模块）待开始：等待所有者确认进入
+- 模块二（引擎层）待开始：把 VecEngine 适配到球面（邻居交互按顶点塌缩、活性接入消耗/移动）
 
 ## 待办事项
-1. 模块一 SphereWorld 开发（本次下一步）
-2. 模块二 VecEngine 适配球面
+1. 模块一 SphereWorld 开发（✅ 已完成）
+2. 模块二 VecEngine 适配球面（本次下一步）
 3. 模块三 Rust 热核 Sim-core
 4. 模块四 observatory 适配 + 快照桥
 5. 模块五 前端渲染层
