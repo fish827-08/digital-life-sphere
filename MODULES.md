@@ -415,3 +415,87 @@ cfg.simulation.use_sim_core = True   # 需要先构建：sim_core/ 下运行 .ve
 **第二轮（预计算邻居表，同一基准参数）**：python 3.030s → **0.615s**（2.049 ms/tick）、rust 3.049s → **0.569s**（1.896 ms/tick）= **约 5x 提速**；双引擎位级一致，REGRESSION CHECK PASS。
 方法：`SphereWorld` 构造时一次性算好全网格邻居表 `_nb_table`(7200,8) + `_pole_nb`(2,120)，`neighbors()` 改为读表返回，消除循环里每次 flat_to_rc/clip/rc_to_flat 的 numpy 反复开销；纯 Python 改动、零 Rust 依赖、行为零变化（`tests/test_sphere_world.py` 全网格逐位对拍兜底）。
 当前瓶颈：Rust 相对 Python 仅 1.08x——剩余大头是 Python 侧 RNG 消费与逐 tick 开销，数值段/邻居段已足够便宜。
+
+---
+
+## 模块四：观察台适配 + 快照桥（observatory / persistence）
+
+> 定位：**观察**（离线统计落盘）+ **直播**（实时快照推流）两件事。
+> 统计口径 = 14 基因位 + 3 派生 trait（基因 + 派生，人确认过的口径）；
+> 快照推送 = 每 100 tick（架构定稿约定，broker 节拍可配）。
+
+### 概览
+
+| 文件 | 角色 | 通俗一句 |
+|------|------|---------|
+| `observatory/traits.py` | 统计口径 | 把基因串翻译成"看得懂的表现型"：14 个基因位 + 3 个派生指标（寿命/代谢倍率/成熟年龄） |
+| `observatory/statistics.py` | 聚合 | 从引擎数组直接算一个"观测点"：trait 均值/标准差、基因组多样性、世代分布 |
+| `observatory/observer.py` | 采样器 | 以"世代"为轴拍照：新世代出现拍一张，长期不出新世代按节拍兜底拍 |
+| `observatory/experiment.py` | 调度 | 确定性实验：规格→派生种子→跑引擎→汇总（ExperimentsRunner + 5 类预置实验） |
+| `observatory/__main__.py` | CLI | `py -m observatory`：命令行跑实验矩阵，结果落盘 results/ |
+| `persistence/io.py` | 落盘 | 每个实验一个目录：manifest.json + generations.csv/json + 批量 survey |
+| `observatory/broker.py` | 快照桥 | 每 N tick 采一份世界快照，WebSocket 推给前端（含个体明细） |
+
+依赖链：`statistics → traits`；`observer → statistics`；`experiment → observer → engine`；
+`broker → engine`（独立于实验管线，可单独 `py -m observatory.broker` 跑直播）。
+
+### 文件 1：`observatory/traits.py` —— trait 表（统计口径）
+
+- `GENE_TRAIT_NAMES`：14 个基因位的语义名（g0 移动概率 … g13 群居性，与引擎 `_genes` 列一一对应）。
+- `_DERIVED_TRAITS`：3 个派生指标，**与引擎同一公式**（防止统计与行为脱节）：
+  - `life_span = 一昼夜 × (1 + g3×7)`（= 引擎 `_lifespan()`）；
+  - `metabolic_mult = 0.5 + g1×1.5`（= 引擎代谢倍率）；
+  - `maturity_age = 寿命 × 0.15`（成熟年龄）。
+- `decode_trait_matrix(genes, day_length)` → (n, 17) 表现型矩阵（观察台专用，不参与演化）。
+
+### 文件 2：`observatory/statistics.py` —— 纯函数聚合
+
+- `GenerationStats`：一个观测点的全部统计（全字段 JSON 安全）：trait 均值/标准差、多样性（平均每位点 Simpson 杂合度）、唯一基因型、世代分布对数桶。
+- `generation_statistics(engine)`：**直接从引擎内部数组聚合**（`_age/_energy/_generation/_genes`）→ 零对象创建、O(N) numpy，与旧版"遍历 Organism 对象"相比快且与 SoA 引擎天然匹配。空种群返回全零合法观测点。
+
+### 文件 3：`observatory/observer.py` —— EvolutionObserver
+
+- 两个触发器：① 种群 max_generation 前进（新世代出现）；② tick_interval 兜底采样 → 时间轴、世代轴都连续。
+- 窗口聚合（出生/死亡计数由调用方逐 tick 喂入）不读引擎历史 → 配合有界历史模式（history_limit=4096）跑百万 tick 实验不依赖被裁剪历史。
+- `GenerationSample.flatten()`：CSV 一行（trait 列按 `trait_<name>_mean/_std` 字母序固定列序，直方图只进 JSON）。
+
+### 文件 4：`observatory/experiment.py` —— 实验调度
+
+- `ExperimentSpec/Run/Result`：规格（名字/组/描述/overrides/世代数/tick 上限）→ 确定性派生种子：`SeedSequence([base_seed, group_id, seed_index])`，同参数必复现同结果。
+- `build_config()`：组装球面 `SimConfig`（嵌套 dataclass），overrides 按子配置分组浅合并（如 `{"genome": {"mutation_rate": 0.3}}`），未覆盖键保默认。
+- `build_plan()`：5 类预置实验（baseline 长程 + pressure/distribution/mutation 短程对照 + repeated_seeds 方差分析）；**球面资源场暂不支持斑块分布 → distribution 组只保留 sparse/rich 均匀对照（诚实标注，不预设机制）**。
+- `run_single`：手动逐 tick 循环（每 tick 后按引擎终止条件置位，与 `engine.run()` 语义对齐）；停止条件 = 世代达标 / 引擎自然结束（含灭绝）/ tick 硬上限。
+- 引擎选择：球面只有 `SphereEngine`（数组化 SoA）；`use_sim_core=True` 走 Rust 数值管线（统计口径不因此改变）。
+
+### 文件 5：`observatory/__main__.py` —— CLI
+
+- `--rows/--cols`（默认 60×120）、`--sim-core`（Rust 开关）、`--names/--group`（只跑部分实验）、`--generations`（baseline 长程世代数，10,000 完整档）。
+- 输出：`--out` 目录，每实验一个子目录（manifest + generations 表）+ 顶层 `__survey__.json/.md` 汇总。
+
+### 文件 6：`persistence/io.py` —— 落盘
+
+- 约定：每实验一个目录 = 名字；`manifest.json`（元数据+完整配置+汇总）、`generations.csv`（宽表）、`generations.json`（镜像）。
+- `save_survey/save_survey_markdown`：批量汇总（性状漂变 start→end 人类可读摘要）；`load_manifest/load_generations` 供读取。
+
+### 文件 7：`observatory/broker.py` —— 快照桥（WebSocket 实时直播）
+
+**接口**
+| 成员 | 说明 |
+|------|------|
+| `SnapshotBroker(engine, interval=100, max_snapshots=4096)` | 快照泵：`pump(ticks, observer)` 推进引擎并按节拍采集；`snapshots` 有界环形标量快照；`snapshot(include_individuals)` 现时刻一份 JSON 安全快照 |
+| `serve(broker, host, port, ticks)` | 异步上下文管理器：泵在后台线程跑，快照经队列逐条广播给所有客户端 |
+| `py -m observatory.broker` | 独立直播入口（`--host/--port/--rows/--cols/--count/--ticks/--interval/--sim-core`） |
+
+**快照内容**：`tick / population / max_generation / total_energy / total_resource / mean_age / mean_energy` + （广播版）`individuals`：每个个体 `{id, flat, energy, generation, age}` —— 前端渲染直接消费。
+**两个设计点**：
+1. 环形缓冲只存标量版（5000 个体 × 4096 份明细会 OOM），明细只在广播时带；
+2. 新客户端连上先补发最新标量快照（落点晚也能立刻看到画面）。
+
+**线程模型**：引擎/rng/ndarray 全程留在泵线程（无跨线程共享）；泵 → `queue.Queue` → asyncio 主循环逐条 `json.dumps` 广播；末条哨兵 `_END_MARK` 通知停机。
+
+### 模块四测试
+
+| 测试文件 | 覆盖 |
+|---------|------|
+| `tests/test_observatory.py` | trait 表口径（17 列/派生公式）；空种群全零观测点；observer 采样连续性；run_single 冒烟/确定性复现/overrides 合并/灭绝专项；config roundtrip；持久化 roundtrip（manifest+CSV） |
+| `tests/test_broker.py` | 节拍采集（tick 100/200/300）；环形缓冲有界；JSON 可序列化；广播带个体明细；WebSocket 端到端推流（兜底+推流 ≥2 份）；无客户端也正常跑完 |

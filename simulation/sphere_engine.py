@@ -219,6 +219,20 @@ class SphereEngine:
     def history(self) -> list[TickStats]:
         return self._history
 
+    @property
+    def total_born(self) -> int:
+        """累计出生数（与 history_limit 无关，全局计数）。"""
+        return self._run_born
+
+    @property
+    def total_died(self) -> int:
+        """累计死亡数（与 history_limit 无关，全局计数）。"""
+        return self._run_died
+
+    def death_cause_totals(self) -> Counter:
+        """累计死因分布（与 history_limit 无关，全局计数）。"""
+        return self._run_deaths.copy()
+
     # ---- 主循环 ----------------------------------------------------------
 
     def step(self) -> TickStats:
@@ -270,10 +284,11 @@ class SphereEngine:
 
     def _populate_history(self, stats: TickStats) -> None:
         self._history.append(stats)
+        # 全局累计（与 history_limit 无关：观察台/存档用）
+        self._run_born += stats.born
+        self._run_died += stats.died
+        self._run_deaths.update(stats.deaths_by_cause)
         if self._history_limit > 0:
-            self._run_born += stats.born
-            self._run_died += stats.died
-            self._run_deaths.update(stats.deaths_by_cause)
             overflow = len(self._history) - self._history_limit
             if overflow > 0:
                 del self._history[:overflow]

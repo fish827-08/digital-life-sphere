@@ -17,20 +17,11 @@
 - [x] 模块二开发（球形引擎 Python 版）——config/tick/lifecycle/sphere_engine 完成；
       基因扩充 g0~g13 + 生命周期年龄（成熟/年龄能耗）；引擎 pytest 套件 7 例全通过；
       observatory 快速长程验证通过（experiments/quick_check_age.py）
-- [>] 模块三开发（Rust 加速核 Sim-core）——环境就绪（VS Build Tools 补齐 MSVC 链接器、
-      cargo 镜像改 HTTPS sparse）；3.1 骨架 + 3.2 regrow 移植完成（与 ResourceField
-      逐位等价，pytest 对拍 5 例通过）；3.3 step_vectors 完成：两段式数值管线
-      stage1/stage2 下沉 Rust（函数级对拍 11 例 + 引擎级对拍 4 例全过，
-      use_sim_core 开关接入引擎，同种子 TickStats 逐位一致）；3.4 regrow 也接入
-      引擎开关并补齐引擎级资源网格逐位断言；3.5 consume_many 移植完成（进食两处
-      批量消耗下沉 Rust，同格均分/绝不欠账与 numpy 逐位等价，函数级 8 例 +
-      引擎级 4 例全过，全量 pytest 30 例通过；use_sim_core 下即换即用）；性能基准
-      （2000 个体 × 300 tick）：结果位级一致但仅 1.01x 提速——瓶颈在 per-individual
-      移动目标 neighbors() 循环（占 ~77% 时间），不在已下沉的向量化数值段 →
-      已实施【预计算全网格邻居表】优化（SphereWorld 构造时算好 _nb_table/_pole_nb，
-      neighbors() 改查表，纯 Python 零行为变化，全网格逐位对拍兜底）：python 3.030s→0.615s、
-      rust 3.049s→0.569s ≈ **5x 提速**，双引擎 REGRESSION CHECK PASS，全量 pytest 34 例通过
-- [ ] 模块四开发（observatory 适配 + 快照桥）
+- [ ] 模块三开发（Rust 加速核 Sim-core，✅ 全部完成：3.1~3.5 下沉 + 预计算邻居表优化，
+      全量 pytest 34 例通过，代码已提交 3ed6fd0）
+- [ ] 模块四开发（observatory 适配 + 快照桥，✅ 完成：traits/statistics/observer/experiment/
+      __main__/persistence/io + broker 快照桥，统计口径=14 基因位+3 派生，快照推送=100 tick，
+      全量 pytest 50 例通过，新增 16 例）
 - [ ] 模块五开发（前端渲染层）
 
 ## 已完成记录
@@ -48,9 +39,10 @@
 | 2026-09-06 | 基因扩充 g4~g13 | 进食量/饱食度/移动能耗/繁殖投入/光合/恒温/邻格觅食/温度偏好/繁殖冷却/群居性；机制单测 + 1000 tick 冒烟通过 |
 | 2026-09-07 | 模块三 3.5：sim_core/src/consume.rs | 进食结算下沉 Rust：先数每格几只再算每只实吃量（同格均分、绝不欠账），按原序逐只扣减，与 numpy `consume_many` 逐位等价；lib.rs 绑定加长度+越界校验；引擎进食/邻格觅食双路径接入；函数级对拍 8 例 + 引擎级 4 例，全量 pytest 30 例通过 |
 | 2026-09-07 | 预计算邻居表优化（world/sphere_world.py） | 构造时一次性算好全网格邻居表 `_nb_table`(7200,8) + `_pole_nb`(2,120)，`neighbors()` 改查表返回；引擎移动/觅食两处调用点零改动，行为零变化（新 tests/test_sphere_world.py 全网格 vs 旧算法逐位对拍）；基准 3.030/3.049s → 0.615/0.569s ≈ 5x，全量 pytest 34 例通过 |
+| 2026-09-07 | 模块四：observatory 适配 + 快照桥（✅） | traits（14 基因位+3 派生，统计口径与引擎同公式）/ statistics（数组化聚合，直接读引擎 SoA 数组）/ observer（世代+节拍双触发器）/ experiment（嵌套 SimConfig + overrides 合并 + SphereEngine runner，run_single 每 tick 对齐终止条件置位）/ __main__ CLI（--rows/--cols/--sim-core）/ persistence/io（manifest+generations 落盘）；快照桥 broker：每 100 tick 采 JSON 快照（含个体明细广播），WebSocket 推流，环形只有标量防 OOM，新客户端连上补发最新快照；pytest 全量 50 例通过（新增 16 例）|
 
 ## 进行中
-- 模块三 Rust 加速核 Sim-core（3.2~3.5 + 预计算邻居表完成；瓶颈已从邻居循环前移到 Python 侧 RNG/逐 tick 开销）
+- 模块四已完成（observatory 适配 + 快照桥），待审阅/提交后进入模块五前端渲染层
 
 ## 待办事项
 1. 模块一 SphereWorld 开发（✅ 已完成）
@@ -84,3 +76,8 @@
 | 2026-09-07 | 基准复跑确认（使用 venv 解释器） | 全量 pytest 22 例通过；基准复跑 python 3.030s vs rust 3.049s = **0.99x**（噪声内持平 = 1x），回归校验 PASS、行为位级一致 | 确认握手结论：Rust 下沉的 regrow/stage1/stage2 数值段无净收益，提速方向在预计算邻居表 |
 | 2026-09-07 | 3.5 consume_many 下沉方式（进食/邻格觅食） | 引擎第 4 步进食 + 邻格补吃的两处批量消耗都走双路径：use_sim_core 时组好数组调 `sim_core.consume_many`（grid 就地改、实吃量写回 out_taken），否则走原来 `ResourceField.consume_many` | 与 regrow/stage1/stage2 同一接入模式；本轮不重跑基准（位置循环是瓶颈，不在进食段）——全量 pytest 30 例通过即为回归无破坏的证据 |
 | 2026-09-07 | **预计算邻居表优化（已实施）** | 只在 `SphereWorld` 构造期动手：一次性算好 `_nb_table`(n_cells,8)（普通格 8 邻，含经度环绕/极点坍缩提前折算）与 `_pole_nb`(2,cols)（两极各一行相邻纬度带），`neighbors()` 从"每次 flat_to_rc+clip+rc_to_flat 现算"改为按行号查表返回（普通格直接取表行、极点格取 pole_nb 行）；引擎两处调用点零改动 | 构造成本一次性 ~毫秒级，却消掉引擎每 tick 数十万次的小 numpy 调用堆栈；查表与现算在全部 7200 格逐位一致（新 tests/test_sphere_world.py 用旧算法做参照对拍）；基准：python 3.030s→0.615s、rust 3.049s→0.569s ≈ **5x**，双引擎位级一致 REGRESSION PASS。当前 rust/python=1.08x，说明剩余瓶颈已在 Python 侧（RNG 消费/逐 tick 数组拼接），数值段与邻居段均已足够便宜，Rust 加速的收益到头了 |
+| 2026-09-07 | 模块四统计口径（GenerationStats.trait_means 用什么） | 基因（14 位原值）+ 派生 trait（寿命/代谢倍率/成熟年龄，与引擎公式同源） | 直接观测表现型语义（人确认的推荐口径），派生列公式与引擎 `_lifespan`/代谢/成熟年龄同一来源 → 统计口径不会与行为脱节 |
+| 2026-09-07 | 模块四范围（observatory 是否连带快照桥） | 连带快照桥一起（PROGRESS 待办口径） | 项目整体按"观察台 + 直播桥"一次交付，前端渲染再单独进模块五 |
+| 2026-09-07 | 模块四 run_single 终止条件 | 手动逐 tick 循环里，每 tick 后执行 `engine._finished = engine._end_condition_met()`（与 `engine.run()` 语义对齐） | 适配时发现手动循环不置 `_finished` 会导致灭绝/跑满不停（浪费 CPU 且 ended_reason 误报 max_ticks）；对齐后灭绝走 stop_on_extinction 提前停 |
+| 2026-09-07 | 球面版 resource_distribution 组实验裁剪 | 只保留 dist_uniform_sparse / dist_uniform_rich 两个均匀对照，删除旧版 patchy（斑块）实验 | 球面资源场（模块一）只支持均匀填充，斑块机制未实现；不预设机制，诚实标注（等资源场支持后补回） |
+| 2026-09-07 | 快照桥消息设计 | tick/总能量/总资源/平均能量等标量 +（广播版）个体明细 {id, flat, energy, generation, age}；环形缓冲只存标量版 | 前端渲染直接消费明细；5000 个体 × 4096 份缓冲会 OOM，明细只在广播时带；新客户端连上先补发最新标量快照（落点晚也能看到画面） |
