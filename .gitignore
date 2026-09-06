@@ -1,0 +1,31 @@
+# AI Code 开发规则（仅本地保留，不提交）
+AI-CODE-DEVELOPMENT-RULES.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Rust
+target/
+Cargo.lock
+
+# 实验结果与数据（不入库）
+results/
+*.csv
+*.json
+!pyproject.toml
+
+# 前端
+node_modules/
+dist/
+*.map
+
+# IDE
+.idea/
+.vscode/
+*.iml
