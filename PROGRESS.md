@@ -17,7 +17,19 @@
 - [x] 模块二开发（球形引擎 Python 版）——config/tick/lifecycle/sphere_engine 完成；
       基因扩充 g0~g13 + 生命周期年龄（成熟/年龄能耗）；引擎 pytest 套件 7 例全通过；
       observatory 快速长程验证通过（experiments/quick_check_age.py）
-- [ ] 模块三开发（Rust 加速核 Sim-core）
+- [>] 模块三开发（Rust 加速核 Sim-core）——环境就绪（VS Build Tools 补齐 MSVC 链接器、
+      cargo 镜像改 HTTPS sparse）；3.1 骨架 + 3.2 regrow 移植完成（与 ResourceField
+      逐位等价，pytest 对拍 5 例通过）；3.3 step_vectors 完成：两段式数值管线
+      stage1/stage2 下沉 Rust（函数级对拍 11 例 + 引擎级对拍 4 例全过，
+      use_sim_core 开关接入引擎，同种子 TickStats 逐位一致）；3.4 regrow 也接入
+      引擎开关并补齐引擎级资源网格逐位断言；3.5 consume_many 移植完成（进食两处
+      批量消耗下沉 Rust，同格均分/绝不欠账与 numpy 逐位等价，函数级 8 例 +
+      引擎级 4 例全过，全量 pytest 30 例通过；use_sim_core 下即换即用）；性能基准
+      （2000 个体 × 300 tick）：结果位级一致但仅 1.01x 提速——瓶颈在 per-individual
+      移动目标 neighbors() 循环（占 ~77% 时间），不在已下沉的向量化数值段 →
+      已实施【预计算全网格邻居表】优化（SphereWorld 构造时算好 _nb_table/_pole_nb，
+      neighbors() 改查表，纯 Python 零行为变化，全网格逐位对拍兜底）：python 3.030s→0.615s、
+      rust 3.049s→0.569s ≈ **5x 提速**，双引擎 REGRESSION CHECK PASS，全量 pytest 34 例通过
 - [ ] 模块四开发（observatory 适配 + 快照桥）
 - [ ] 模块五开发（前端渲染层）
 
@@ -34,9 +46,11 @@
 | 2026-09-06 | 模块二：simulation/tick.py + core/lifecycle.py | TickStats 快照 + DeathCause 死因枚举（饿死/老死） |
 | 2026-09-06 | 模块二：simulation/sphere_engine.py | 引擎核心：单 tick 流程 0~9、数组化推进、繁殖/死亡/清理 |
 | 2026-09-06 | 基因扩充 g4~g13 | 进食量/饱食度/移动能耗/繁殖投入/光合/恒温/邻格觅食/温度偏好/繁殖冷却/群居性；机制单测 + 1000 tick 冒烟通过 |
+| 2026-09-07 | 模块三 3.5：sim_core/src/consume.rs | 进食结算下沉 Rust：先数每格几只再算每只实吃量（同格均分、绝不欠账），按原序逐只扣减，与 numpy `consume_many` 逐位等价；lib.rs 绑定加长度+越界校验；引擎进食/邻格觅食双路径接入；函数级对拍 8 例 + 引擎级 4 例，全量 pytest 30 例通过 |
+| 2026-09-07 | 预计算邻居表优化（world/sphere_world.py） | 构造时一次性算好全网格邻居表 `_nb_table`(7200,8) + `_pole_nb`(2,120)，`neighbors()` 改查表返回；引擎移动/觅食两处调用点零改动，行为零变化（新 tests/test_sphere_world.py 全网格 vs 旧算法逐位对拍）；基准 3.030/3.049s → 0.615/0.569s ≈ 5x，全量 pytest 34 例通过 |
 
 ## 进行中
-- 模块三 Rust 加速核 Sim-core（下一步）
+- 模块三 Rust 加速核 Sim-core（3.2~3.5 + 预计算邻居表完成；瓶颈已从邻居循环前移到 Python 侧 RNG/逐 tick 开销）
 
 ## 待办事项
 1. 模块一 SphereWorld 开发（✅ 已完成）
@@ -62,3 +76,11 @@
 | 2026-09-06 | 基因位评估（参照 The Bibites 28 基因） | **加入**：光合(冷血收益)、恒温（费能换低温不减速）、邻格觅食、温度偏好、繁殖冷却、群居性；**暂缓**：食性/捕食（要"尸体+伤害"机制）、脂肪储能（要存储池）、感知/交流（独立感知子系统，是"生物间能否交流"的评估结论——等引擎稳定后另立模块再评）、器官分配（器官系统） | 优先接入与现存机制正交的基因，避免为单个基因造一整块新系统 |
 | 2026-09-06 | "一出生就能繁衍"问题 | 引入**生命周期年龄**：未到成熟年龄（=寿命×15%，寿命由 g3 定）一律不能繁衍；能量需求随年龄变：幼体×1.6（长身体）/成年×1/老年×1.4（器官退化） | 防止新生命前几代疯狂爆发；寿命长则成熟晚→自然涌现"速生速死"vs"晚熟长寿"两种策略 |
 | 2026-09-06 | 生命周期年龄长程验证（模块二收尾） | 新增 experiments/quick_check_age.py 做 4000 tick 快速长程检查：结果未灭绝、世代达 12、寿命 g3 std=622 保留、速生(g3低 均2285)vs晚熟(g3高 均3762)两类策略并存 → 机制生效 | 验证成熟门槛确实抑制"出生即生"、能量需求随年龄分化，同时长寿基因多样性不被冲掉 |
+| 2026-09-06 | **寿命数值平衡（寿命 vs 昼夜）** | 寿命公式 `200 + g3×3800`（[200,4000]，小于一昼夜 2400）改为 **一昼夜 × (1 + g3×7)**（[2400,19200]，最短整整一昼夜、最长八昼夜），并抽象为引擎 `_lifespan()` 统一出口（挂 `light.rotation_period`，改昼夜设置自动缩放） | 原寿命全部小于/接近一昼夜，生物来不及对昼夜做反应；新基准保证所有个体至少活满一昼夜，仍保留"速生(候1昼夜)vs晚熟(候8昼夜)"分化 |
+| 2026-09-06 | 3.3 管线切分（为什么两段式） | `_step_population` 的数值运算拆成 **stage1（第 1~3 步：光合/代谢/维持）** 与 **stage2（第 5~8 步：移动扣费/年龄/死亡/冷却/繁殖候选）**，中间的"进食（步骤 4）+ 移动抽样/觅食目标选择（RNG）"留 Python | 步骤 4~5 依赖 RNG 且在 Python 侧要按原顺序消费随机数（同种子同结果）；Rust 只碰确定性数值，才能逐位对拍 |
+| 2026-09-06 | 3.3 对拍保证策略 | ① 数值纪律：Rust 只用 f64 四则 + min/max，禁 exp/pow → 与 numpy 逐位一致；② 函数级：同一份随机种群分别走 py_stage1/2 参考实现与 Rust stage1/2，assert_array_equal 全部输出；③ 引擎级：同 seed 两个引擎（use_sim_core 开关），逐 tick TickStats + 最终内部数组逐位比较 | 三层递进：先证函数位级一致，再证接入引擎后 RNG 消费顺序不变、整体行为不变 |
+| 2026-09-07 | 3.4 regrow 接入方式 | 不在 ResourceField 内部加开关，而是引擎 `_advance_one_tick` 里双路径：use_sim_core 时组好温度数组调 sim_core.regrow，否则调 ResourceField.regrow | 与 3.3 步进下沉同一模式，资源场类保持零改动；sens=1.0 严格逐位，≠1 允许 ≤1-ULP（函数级 1e-9 容差兜底） |
+| 2026-09-07 | **性能基准结论（重要）** | 2000 个体 × 300 tick 基准：rust 3.043s vs python 3.078s = **1.01x**，行为位级一致；cProfile 定位瓶颈：`SphereWorld.neighbors()` 逐个体调用 190,722 次占 **~77%**（移动目标选择 + 邻格觅食两个 per-individual Python 循环，内部反复 flat_to_rc/clip/rc_to_flat），其次 numpy.clip 0.99s | 已下沉的向量化数值段本就便宜（numpy 已向量化），真正的热点是"逐个体循环里的邻居索引计算"；优化方向定为：**预计算全网格邻居表**（类成员缓存，一次算好 (n_cells, 8) int64 数组，循环内直接查行）——纯 Python 即可，不依赖 Rust |
+| 2026-09-07 | 基准复跑确认（使用 venv 解释器） | 全量 pytest 22 例通过；基准复跑 python 3.030s vs rust 3.049s = **0.99x**（噪声内持平 = 1x），回归校验 PASS、行为位级一致 | 确认握手结论：Rust 下沉的 regrow/stage1/stage2 数值段无净收益，提速方向在预计算邻居表 |
+| 2026-09-07 | 3.5 consume_many 下沉方式（进食/邻格觅食） | 引擎第 4 步进食 + 邻格补吃的两处批量消耗都走双路径：use_sim_core 时组好数组调 `sim_core.consume_many`（grid 就地改、实吃量写回 out_taken），否则走原来 `ResourceField.consume_many` | 与 regrow/stage1/stage2 同一接入模式；本轮不重跑基准（位置循环是瓶颈，不在进食段）——全量 pytest 30 例通过即为回归无破坏的证据 |
+| 2026-09-07 | **预计算邻居表优化（已实施）** | 只在 `SphereWorld` 构造期动手：一次性算好 `_nb_table`(n_cells,8)（普通格 8 邻，含经度环绕/极点坍缩提前折算）与 `_pole_nb`(2,cols)（两极各一行相邻纬度带），`neighbors()` 从"每次 flat_to_rc+clip+rc_to_flat 现算"改为按行号查表返回（普通格直接取表行、极点格取 pole_nb 行）；引擎两处调用点零改动 | 构造成本一次性 ~毫秒级，却消掉引擎每 tick 数十万次的小 numpy 调用堆栈；查表与现算在全部 7200 格逐位一致（新 tests/test_sphere_world.py 用旧算法做参照对拍）；基准：python 3.030s→0.615s、rust 3.049s→0.569s ≈ **5x**，双引擎位级一致 REGRESSION PASS。当前 rust/python=1.08x，说明剩余瓶颈已在 Python 侧（RNG 消费/逐 tick 数组拼接），数值段与邻居段均已足够便宜，Rust 加速的收益到头了 |

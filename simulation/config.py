@@ -123,6 +123,7 @@ class SimulationConfig:
     ticks: int = 1000               # 计划运行的最大 tick 数
     stop_on_extinction: bool = True    # 种群归零时提前停
     history_limit: int = 0          # 统计历史保留上限（0=无限，长程实验用环形尾部）
+    use_sim_core: bool = False      # True=种群数值管线走 Rust（sim_core.step_vectors）
 
     def __post_init__(self) -> None:
         assert self.ticks >= 1, "至少跑一个 tick"

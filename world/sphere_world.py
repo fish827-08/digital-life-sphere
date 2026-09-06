@@ -45,7 +45,10 @@ class SphereWorld:
         下极点行索引，恒为 rows - 1。
     """
 
-    __slots__ = ("rows", "cols", "_lat", "_area", "_n", "_pole_top", "_pole_bottom")
+    __slots__ = (
+        "rows", "cols", "_lat", "_area", "_n", "_pole_top", "_pole_bottom",
+        "_nb_table", "_pole_nb",
+    )
 
     # ---- 构造函数 ----------------------------------------------------------
 
@@ -78,6 +81,10 @@ class SphereWorld:
         # 极点行索引（上极 / 下极）
         self._pole_top = 0
         self._pole_bottom = rows - 1
+
+        # 预计算邻居表（构造时一次性算好，之后 neighbors() 直接查行，
+        # 不再每次重算 flat_to_rc / clip / rc_to_flat，省掉逐调用的 numpy 开销）
+        self._nb_table, self._pole_nb = self._build_neighbor_cache()
 
     # ---- 只读属性 ----------------------------------------------------------
 
@@ -204,6 +211,43 @@ class SphereWorld:
 
     # ---- 邻居查询 ----------------------------------------------------------
 
+    def _build_neighbor_cache(self) -> tuple:
+        """一次性预计算全部邻居索引（构造时调用）。
+
+        返回
+        ----
+        (nb_table, pole_nb) :
+            nb_table : NDArray[int64], 形状 (n_cells, 8)
+                第 f 行即格 f 的 8 个邻居 flat（含对角；经度环绕、极点坍缩
+                都按 rc_to_flat 的规则提前算好）。极点格行填 -1 占位（不在本表查）。
+            pole_nb : NDArray[int64], 形状 (2, cols)
+                行 0 = 上极整行邻居 = 相邻纬度带（row 1）整行；
+                行 1 = 下极整行邻居 = 相邻纬度带（row rows-2）整行。
+
+        语义与旧的逐次计算完全一致（见 neighbors() 的返回契约），只是移到
+        构造时跑一遍；普通格 8 邻顺序 = 上左/上/上右/左/右/下左/下/下右。
+        """
+        drow = np.array([-1, -1, -1, 0, 0, 1, 1, 1], dtype=np.int64)
+        dcol = np.array([-1, 0, 1, -1, 1, -1, 0, 1], dtype=np.int64)
+        rows = np.arange(self._n) // self.cols
+        cols = np.arange(self._n) % self.cols
+        r_all = np.clip(rows[:, None] + drow[None, :], 0, self.rows - 1)
+        c_all = (cols[:, None] + dcol[None, :]) % self.cols
+        # 极点行：物理坍缩为 col 0（与 rc_to_flat 的极点特判一致）
+        pole = (r_all == self._pole_top) | (r_all == self._pole_bottom)
+        c_all = np.where(pole, 0, c_all)
+        table = (r_all * self.cols + c_all).astype(np.int64)
+        # 极点格行不查本表，填 -1 占位（neighbors() 走 pole_nb）
+        pole_row_mask = (rows == self._pole_top) | (rows == self._pole_bottom)
+        table[pole_row_mask] = -1
+        adj_top = self._pole_top + 1
+        adj_bot = self._pole_bottom - 1
+        pole_nb = np.stack([
+            np.arange(self.cols, dtype=np.int64) + adj_top * self.cols,
+            np.arange(self.cols, dtype=np.int64) + adj_bot * self.cols,
+        ])
+        return table, pole_nb
+
     def neighbors(self, flat: int) -> NDArray[np.int64]:
         """查询单个格子的邻居（含对角，纬度方向取舍见返回说明）。
 
@@ -219,19 +263,17 @@ class SphereWorld:
                     纬度方向在极点处钳制回界内，即最外行列不越界）。
             极点格：恒 cols 个 —— 相邻纬度带整行（向赤道方向一行）的所有格。
                     含义：从极点可一步到达赤道方向任意经度。
-        """
-        row, col = self.flat_to_rc(np.asarray(flat, dtype=np.int64))
-        row, col = int(row), int(col)
-        if row in (self._pole_top, self._pole_bottom):
-            # 极点：邻居 = 相邻纬度带整行（向赤道方向移一行）
-            adj = self._pole_top + 1 if row == self._pole_top else self._pole_bottom - 1
-            return (np.arange(self.cols) + adj * self.cols).astype(np.int64)
 
-        drow = np.array([-1, -1, -1, 0, 0, 1, 1, 1], dtype=np.int64)
-        dcol = np.array([-1, 0, 1, -1, 1, -1, 0, 1], dtype=np.int64)
-        r = np.clip(row + drow, 0, self.rows - 1)  # 纬度不越界（两极已在上面处理）
-        c = (col + dcol) % self.cols  # 经度环绕
-        return self.rc_to_flat(r, c)
+        实现：构造时已把全部邻居索引预计算成表（_nb_table / _pole_nb），
+        这里只是按行号查表返回，不再逐次做坐标运算。
+        """
+        f = int(flat)
+        row = f // self.cols
+        if row == self._pole_top:
+            return self._pole_nb[0]
+        if row == self._pole_bottom:
+            return self._pole_nb[1]
+        return self._nb_table[f]
 
     # ---- 调试 / 展示 -------------------------------------------------------
 

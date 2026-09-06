@@ -32,15 +32,15 @@ MATURE_FRACTION = 0.15   # 成熟年龄 = 寿命×15%（与 config 默认对齐�
 SENILE_FRACTION = 0.75
 
 
-def lifespan(genes: np.ndarray) -> np.ndarray:
-    """寿命基因 g3 → tick 寿命：200 + g3×3800。"""
-    return 200.0 + genes[:, 3] * 3800.0
+def lifespan(day: float, g3: np.ndarray) -> np.ndarray:
+    """寿命（tick）= 一昼夜 × (1 + g3×7)：最短 1 昼夜、最长 8 昼夜。"""
+    return day * (1.0 + g3 * 7.0)
 
 
 def snapshot(engine: SphereEngine) -> dict:
     genes = engine._genes
     age = engine._age.astype(np.float64)
-    life = lifespan(genes)
+    life = lifespan(engine.config.light.rotation_period, genes[:, 3])
     ratio = age / life  # 已活到寿命的几成
     q = np.percentile(life, [25, 50, 75]).astype(int)
     return {

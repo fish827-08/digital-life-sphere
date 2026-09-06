@@ -29,3 +29,6 @@ dist/
 .idea/
 .vscode/
 *.iml
+# 构建日志（临时产物）
+build_log.txt
+

@@ -40,15 +40,16 @@ def first_birth_tick(engine, run_ticks):
 # ---------------------------------------------------------------------------
 
 def test_maturity_gate_blocks_juvenile_reproduction():
-    """默认成熟年龄是寿命的 15%（g3=0.5 → 寿命2100 → 成熟315 tick）。"""
+    """未成熟（年龄 < 寿命×15%）绝不能繁衍。
+    g3=0.0 → 寿命 = 一昼夜(2400)×1 = 2400 → 成熟年龄 360 tick。"""
     e = make_engine()
-    set_genes(e, 0, g0=0.0, g2=0.0, g5=1.0)
+    set_genes(e, 0, g0=0.0, g2=0.0, g3=0.0, g5=1.0)
     e._flat[:] = EQUATOR
     e._energy[0] = 300.0
     e.resources._grid[:] = 50.0
-    birth = first_birth_tick(e, 400)
+    birth = first_birth_tick(e, 700)
     assert birth is not None
-    assert birth >= 315, f"未成熟不应繁衍，却在第 {birth} tick 生"
+    assert birth >= 360, f"未成熟不应繁衍，却在第 {birth} tick 生"
 
 
 def test_disable_maturity_reproduces_immediately():
@@ -75,7 +76,7 @@ def test_maintenance_depends_on_age():
         g = np.zeros((1, 16), dtype=np.float64)
         g[0, :] = 0.0
         g[0, 1] = 1.0   # metab_mult = 2.0（确定性能耗）
-        g[0, 3] = 1.0   # 寿命 4000（两点都在寿限内、非老年）
+        g[0, 3] = 1.0   # 寿命 = 2400×8 = 19200（成熟2880 / 老年14400，两点都在区间内）
         g[0, 9] = 1.0   # 恒温，不受温度偏好干扰
         e._genes = g
         e._flat[:] = EQUATOR
@@ -87,8 +88,8 @@ def test_maintenance_depends_on_age():
             e.step()
         return float(e._energy[0])
 
-    juv = drain(0)        # 幼体（0 < 成熟 600）
-    adult = drain(1200)   # 成年（600 < 1200 < 老年 3000）
+    juv = drain(0)        # 幼体（0 < 成熟 2880）
+    adult = drain(4000)   # 成年（2880 < 4000 < 老年 14400）
     assert juv < adult, "幼体维持耗能应高于成年"
     assert (50 - juv) - (50 - adult) > 3.0, "年龄能耗差太小"
 
@@ -105,14 +106,14 @@ def test_photosynthesis_income_g8():
         g[0, :] = 0.0
         g[0, 0] = 0.0   # 不动
         g[0, 1] = 0.0   # 代谢最低
-        g[0, 3] = 1.0   # 寿命 4000（age 不在老年段）
+        g[0, 3] = 1.0   # 寿命 = 2400×8 = 19200（成熟2880 / 老年14400）
         g[0, 8] = g8
         e._genes = g
         e._flat[:] = EQUATOR  # 赤道
         e._tick = 597         # 连续 5 tick 都落在赤道正午前后
         e._energy[0] = 200.0
         e.resources._grid[:] = 0.0
-        e._age[0] = 1200      # 成年（600 < 1200 < 3000）
+        e._age[0] = 4000      # 成年（2880 < 4000 < 14400）
         for _ in range(5):
             e.step()
         return float(e._energy[0])
@@ -130,7 +131,7 @@ def test_repro_cooldown_g12():
     e._flat[:] = EQUATOR
     e._energy[0] = 300.0
     e.resources._grid[:] = 50.0
-    e._age[0] = 315  # 已成熟
+    e._age[0] = 2000  # 已成熟（g3=0.5 → 寿命10800 → 成熟年龄1620）
     e._repro_cooldown[0] = 60.0  # 强制冷却
     births = sum(e.step().born for _ in range(5))
     assert births == 0, "冷却未过却繁衍了"
