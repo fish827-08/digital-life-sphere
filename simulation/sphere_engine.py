@@ -44,6 +44,7 @@ from simulation.config import SimConfig
 from simulation.tick import TickStats
 from world.light_and_temperature import LightAndTemperature
 from world.resource_field import ResourceField
+from world.signal_field import SignalField
 from world.sphere_world import SphereWorld
 
 
@@ -102,10 +103,11 @@ class SphereEngine:
     """
 
     __slots__ = (
-        "config", "rng", "world", "light", "resources",
+        "config", "rng", "world", "light", "resources", "signals",
         "_flat", "_energy", "_stomach", "_genes", "_age", "_generation",
         "_parent", "_id", "_next_id", "_max_generation",
         "_repro_cooldown",
+        "_valence", "_arousal", "_expectation", "_baseline",
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
@@ -161,6 +163,8 @@ class SphereEngine:
             # 用 config.seed 派生 patch 中心：可复现，且独立 rng 不消费引擎 self.rng
             patch_seed=config.seed,
         )
+        # 田字格信号场（L2/L3）：生物可写入/读取 16 种标记模式
+        self.signals = SignalField(self.world, duration=50)
 
         n = config.population.initial_count
         self._flat = np.zeros(n, dtype=np.int64)
@@ -180,6 +184,22 @@ class SphereEngine:
         self._id = np.arange(n, dtype=np.int64)
         self._next_id = n
         self._max_generation = 0
+
+        # 愉悦度系统（L2）：四数组 + 预测误差驱动
+        # _valence: 情绪效价 -1~1（瞬态，RPE 响应）
+        # _arousal: 唤醒度 0~1（意外事件→高唤醒）
+        # _expectation: (N, 120) 预期表（120 情境，EWMA 学习）
+        # _baseline: 基线慢漂移（习惯化）
+        pcfg = self.config.pleasure
+        self._valence = np.zeros(n, dtype=np.float64)
+        self._arousal = np.full(n, 0.5, dtype=np.float64)
+        self._baseline = np.zeros(n, dtype=np.float64)
+        # 乐观初始化：0.8 × max_reward，逼生物探索（预期高→现实可能超预期→愉悦）
+        self._expectation = np.full(
+            (n, pcfg.expectation_size),
+            pcfg.optimism * pcfg.max_reward,
+            dtype=np.float64,
+        )
 
         # 出生位置：均匀随机格（不做地形障碍过滤，球面无障碍）
         self._flat = self.rng.integers(0, self.world.n_cells, size=n).astype(
@@ -274,6 +294,8 @@ class SphereEngine:
             )
         else:
             self.resources.regrow(self._tick)
+        # 信号场时间推进（标记衰减、过期清零）
+        self.signals.tick()
         born, died, deaths = self._step_population()
         return TickStats(
             tick=self._tick,
@@ -337,6 +359,8 @@ class SphereEngine:
         genes = self._genes[:P]
         energy = self._energy[:P]
         stomach = self._stomach[:P]
+        # 愉悦度：记录 tick 开始时的能量（步骤 1~8 会修改 energy）
+        energy_before = energy.copy() if self.config.pleasure.enabled else None
 
         # 0) 个体化温度响应（恒温基因 g9 + 温度偏好基因 g11）：
         #    冷血（g9=0）完全随环境：低温时消化慢、行动贵；
@@ -445,6 +469,30 @@ class SphereEngine:
                     taken2 = self.resources.consume_many(targets, short[hf])
                 stomach[hf] += taken2
 
+        # 4.5) 信号发射（g15）：以基因概率在当前格写入田字格标记，耗能
+        #     模式 = 状态哈希（能量2位 + 食物1位 + 邻居1位 = 4位=16种）
+        signal_gene = genes[:, 15]
+        emitters = np.flatnonzero(self.rng.random(P) < signal_gene)
+        if len(emitters):
+            SIGNAL_COST = 0.5
+            can_afford = energy[emitters] >= SIGNAL_COST
+            emitters = emitters[can_afford]
+            if len(emitters):
+                energy[emitters] -= SIGNAL_COST
+                e_flat = self._flat[emitters]
+                # 模式编码：能量档(2位,bit3-2) + 食物(1位,bit1) + 邻居(1位,bit0)
+                e_bin = np.clip(
+                    (energy[emitters] / max(1e-9, ocfg.max_energy) * 4).astype(np.int64), 0, 3
+                )
+                f_bit = (
+                    self.resources._grid[e_flat]
+                    > 0.5 * self.resources._capacity[e_flat]
+                ).astype(np.int64)
+                dens = np.bincount(self._flat[:P], minlength=self.world.n_cells)
+                n_bit = (dens[e_flat] > 1).astype(np.int64)
+                patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
+                self.signals.write_many(e_flat, patterns)
+
         # 5) 移动：raw 抽样在 Python（RNG），能量门槛判定两路径一致（Rust 在 stage2 内）
         if self._use_sim_core:
             moved_raw = self.rng.random(P) < genes[:, 0]
@@ -467,19 +515,31 @@ class SphereEngine:
         Nm = int(moved.sum())
         if Nm:
             mi = np.flatnonzero(moved)
-            # 群居性（g13）：g>0.5 朝同伴多的邻格走（聚群），
-            # g<0.5 专挑冷清邻格走（避群），g≈0.5 或单邻格则随机。
-            densities = np.bincount(self._flat, minlength=self.world.n_cells)
+            # 预计算全格食物归一化与信号存在（循环内查表，避免重复计算）
+            food_ratio = self.resources._grid / np.maximum(
+                self.resources._capacity, 1e-9
+            )
+            sig_present = (self.signals._marks > 0).astype(np.float64)
+            densities = np.bincount(self._flat, minlength=self.world.n_cells).astype(
+                np.float64
+            )
             targets = np.empty(Nm, dtype=np.int64)
             for i, idx in enumerate(mi):
-                nb = self.world.neighbors(int(self._flat[idx]))
-                soc = genes[idx, 13]
-                if len(nb) == 1 or abs(soc - 0.5) < 0.1:
+                nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                if len(nb) == 1:
+                    targets[i] = nb[0]
+                    continue
+                # g14 感知权重：越高越看重食物和信号
+                perc = genes[idx, 14]
+                # g13 群居权重：>0.5 聚群（正），<0.5 避群（负）
+                soc = (genes[idx, 13] - 0.5) * 2.0
+                # 邻格得分 = 感知×(食物×0.7+信号×0.3) + 群居×密度
+                score = perc * (food_ratio[nb] * 0.7 + sig_present[nb] * 0.3) + soc * densities[nb]
+                if score.max() - score.min() < 1e-9:
+                    # 得分无差异 → 随机（保留原有随机行为）
                     targets[i] = nb[int(self.rng.integers(0, len(nb)))]
-                elif soc > 0.5:
-                    targets[i] = nb[int(np.argmax(densities[np.asarray(nb)]))]
                 else:
-                    targets[i] = nb[int(np.argmin(densities[np.asarray(nb)]))]
+                    targets[i] = nb[int(np.argmax(score))]
             self._flat[mi] = targets
             if not self._use_sim_core:
                 energy[mi] -= move_cost_ind[mi]  # Rust 路径已在 stage2 内扣除
@@ -556,10 +616,31 @@ class SphereEngine:
             new_gen = self._generation[ri] + 1
             self._generation = np.concatenate([self._generation, new_gen])
             self._parent = np.concatenate([self._parent, self._id[ri]])
+            # 愉悦度：子代继承亲代 expectation + 噪声（文化传递载体）
+            pcfg = self.config.pleasure
+            child_exp = self._expectation[ri].copy()
+            child_exp += self.rng.normal(
+                0.0, pcfg.inheritance_noise, size=child_exp.shape
+            )
+            child_exp = np.clip(child_exp, 0.0, pcfg.max_reward)
+            self._expectation = np.concatenate([self._expectation, child_exp])
+            self._valence = np.concatenate(
+                [self._valence, np.zeros(K, dtype=np.float64)]
+            )
+            self._arousal = np.concatenate(
+                [self._arousal, np.full(K, 0.5, dtype=np.float64)]
+            )
+            self._baseline = np.concatenate(
+                [self._baseline, self._baseline[ri] * 0.5]
+            )
             born = K
             new_max = int(self._generation.max())
             if new_max > self._max_generation:
                 self._max_generation = new_max
+
+        # 8.5) 愉悦度更新（RPE 预测误差驱动）：对前 P 个亲代计算
+        if self.config.pleasure.enabled and energy_before is not None:
+            self._update_pleasure(P, energy_before)
 
         # 9) 清理尸体（只清理本 tick 行动的旧行；子代不受影响）
         if dead.any():
@@ -582,7 +663,97 @@ class SphereEngine:
             self._repro_cooldown = np.concatenate(
                 [self._repro_cooldown[:P][keep], self._repro_cooldown[P:]]
             )
+            self._valence = np.concatenate(
+                [self._valence[:P][keep], self._valence[P:]]
+            )
+            self._arousal = np.concatenate(
+                [self._arousal[:P][keep], self._arousal[P:]]
+            )
+            self._baseline = np.concatenate(
+                [self._baseline[:P][keep], self._baseline[P:]]
+            )
+            self._expectation = np.concatenate(
+                [self._expectation[:P][keep], self._expectation[P:]]
+            )
 
         if len(self._id) == 0:
             self._extinct = True
         return born, n_starved + n_expired, Counter(deaths)
+
+    # ---- 愉悦度系统（L2） --------------------------------------------------
+
+    def _update_pleasure(self, P: int, energy_before: NDArray[np.float64]) -> None:
+        """对前 P 个亲代更新愉悦度（RPE 预测误差驱动）。
+
+        核心：愉悦 = 实际获得 − 预期获得。
+        1. 情境编码（120 种：能量5×食物4×邻居3×信号2）
+        2. 事件收益（Δ能量 + 社会增益，信息增益待信号场接入）
+        3. RPE = 收益 − expectation[情境]
+        4. 更新 valence（瞬态）/arousal（唤醒）/expectation（EWMA 学习）/baseline（习惯化）
+
+        只更新前 P 个个体（本 tick 开始时存在的亲代），子代不参与本 tick。
+        """
+        pcfg = self.config.pleasure
+        max_e = self.config.organisms.max_energy
+        idx = np.arange(P)
+        flat = self._flat[:P]
+        energy_now = self._energy[:P]
+
+        # 1) 情境编码
+        # 能量档：energy/max_energy → 0~4
+        e_bin = np.clip((energy_now / max_e) * 5, 0, 4).astype(np.int64)
+        # 食物档：所在格食物/capacity → 0~3
+        food_ratio = np.clip(
+            self.resources._grid[flat] / np.maximum(self.resources._capacity[flat], 1e-9),
+            0.0, 1.0,
+        )
+        f_bin = np.clip((food_ratio * 4).astype(np.int64), 0, 3)
+        # 邻居档：所在格密度 → 0(无)/1(1-2)/2(3+)
+        densities = np.bincount(flat, minlength=self.world.n_cells)
+        n_count = densities[flat]
+        n_bin = np.where(n_count == 0, 0, np.where(n_count <= 2, 1, 2))
+        # 信号档：第一版信号场未接入引擎，全 0（待 L3 信号基因接入后填）
+        s_bin = np.zeros(P, dtype=np.int64)
+        # 组合索引：e×24 + f×6 + n×2 + s
+        context = e_bin * 24 + f_bin * 6 + n_bin * 2 + s_bin
+
+        # 2) 事件收益
+        delta_e = np.clip((energy_now - energy_before) / max_e, -1.0, 1.0)
+        social = np.where(n_count > 0, 0.2, -0.1)  # 有同伴→正，孤独→负
+        # 信息增益：所在格有信号标记 → 获得信息（好奇心满足）
+        info = np.where(self.signals._marks[flat] > 0, 0.3, 0.0)
+        reward = pcfg.w_energy * delta_e + pcfg.w_info * info + pcfg.w_social * social
+
+        # 3) RPE = 实际 − 预期
+        expected = self._expectation[idx, context]
+        rpe = reward - expected
+
+        # 4) 更新四数组
+        # valence：瞬态响应 + 衰减回中性
+        self._valence[:P] += rpe * 0.3
+        self._valence[:P] *= pcfg.valence_decay
+        self._valence[:P] = np.clip(self._valence[:P], -1.0, 1.0)
+        # arousal：意外事件（|RPE| 大）→ 高唤醒
+        self._arousal[:P] += np.abs(rpe) * 0.2
+        self._arousal[:P] *= pcfg.arousal_decay
+        self._arousal[:P] = np.clip(self._arousal[:P], 0.0, 1.0)
+        # expectation：EWMA 学习（慢半拍，那半拍就是愉悦来源）
+        self._expectation[idx, context] += pcfg.alpha * rpe
+        self._expectation[:P] = np.clip(self._expectation[:P], 0.0, pcfg.max_reward)
+        # baseline：慢漂移（习惯化——长期愉悦/不愉悦会被适应）
+        self._baseline[:P] = (
+            self._baseline[:P] * (1.0 - pcfg.baseline_rate)
+            + self._valence[:P] * pcfg.baseline_rate
+        )
+
+    def pleasure_summary(self) -> dict:
+        """愉悦度系统的统计快照（给观察者/实验用）。"""
+        if len(self._id) == 0:
+            return {"valence_mean": 0.0, "arousal_mean": 0.0, "baseline_mean": 0.0}
+        return {
+            "valence_mean": float(self._valence.mean()),
+            "valence_std": float(self._valence.std()),
+            "arousal_mean": float(self._arousal.mean()),
+            "baseline_mean": float(self._baseline.mean()),
+            "expectation_mean": float(self._expectation.mean()),
+        }

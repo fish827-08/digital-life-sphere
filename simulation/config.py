@@ -149,6 +149,33 @@ class SimulationConfig:
 
 
 @dataclass
+class PleasureConfig:
+    """愉悦度系统参数（L2）：预测误差驱动的内在动机系统。
+
+    核心公式：愉悦度 = 实际获得 − 预期获得（RPE，对应多巴胺系统）。
+    不是"做好事给分"，而是"比预期好就愉悦"。
+    """
+
+    enabled: bool = True               # 总开关（False 时愉悦度数组仍存在但不更新）
+    expectation_size: int = 120        # 情境数（能量5×食物4×邻居3×信号2=120）
+    alpha: float = 0.05                # EWMA 预期学习率（越小越慢、越稳定）
+    valence_decay: float = 0.95        # valence 每 tick 衰减（回到中性 0）
+    arousal_decay: float = 0.97        # arousal 衰减（意外事件→高唤醒）
+    baseline_rate: float = 0.001       # baseline 慢漂移率（习惯化）
+    optimism: float = 0.8               # 初始乐观系数（expectation = optimism × max_reward）
+    max_reward: float = 2.0             # 单 tick 最大可能收益（用于乐观初始化归一化）
+    w_energy: float = 0.5               # 事件收益：Δ能量权重
+    w_info: float = 0.3                 # 事件收益：信息增益权重
+    w_social: float = 0.2               # 事件收益：社会增益权重
+    inheritance_noise: float = 0.02     # 繁殖时 expectation 继承噪声（文化传递载体）
+
+    def __post_init__(self) -> None:
+        assert 0 < self.alpha <= 1, "alpha 应在 (0,1]"
+        assert 0 < self.valence_decay <= 1, "valence_decay 应在 (0,1]"
+        assert self.expectation_size == 120, "当前情境编码固定为 5×4×3×2=120"
+
+
+@dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
 
@@ -160,6 +187,7 @@ class SimConfig:
     genome: GenomeConfig = field(default_factory=GenomeConfig)
     population: PopulationConfig = field(default_factory=PopulationConfig)
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
+    pleasure: PleasureConfig = field(default_factory=PleasureConfig)
 
     # ---- 可复现性辅助：配置 ⇄ dict ------------------------------
 
