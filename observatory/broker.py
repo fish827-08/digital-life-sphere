@@ -166,11 +166,13 @@ class SnapshotServer:
 
     async def __aexit__(self, *exc) -> None:
         self._pump_task.cancel()
-        with suppress(Exception):
+        # CancelledError 继承 BaseException（Python 3.8+），不能用 suppress(Exception)，
+        # 否则 pump 任务恰好在 asyncio.to_thread 中间被取消时会漏出未抑制的 CancelledError。
+        with suppress(BaseException):
             await self._pump_task
         if self.server is not None:
             self.server.close()
-            with suppress(Exception):
+            with suppress(BaseException):
                 await self.server.wait_closed()
 
     # ---- 属性 ----------------------------------------------------------

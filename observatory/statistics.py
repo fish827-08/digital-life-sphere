@@ -80,7 +80,7 @@ def generation_statistics(engine) -> GenerationStats:
     ages = np.asarray(engine._age, dtype=np.float64)
     energies = np.asarray(engine._energy, dtype=np.float64)
     gens = np.asarray(engine._generation, dtype=np.int64)
-    genes = np.asarray(engine._genes)  # (n, 16)
+    genes = np.asarray(engine._genes)  # (n, gene_count)
 
     # ---- trait 分布（表现型，来自基因解码） ----
     day = float(engine.config.light.rotation_period)

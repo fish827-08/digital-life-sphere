@@ -56,22 +56,26 @@ class TestPredation:
 
 class TestPlant:
     def test_plant_reduces_movement(self):
-        """g19 高的个体移动概率 = g0 × (1-g19)，显著降低。"""
+        """g19 高的个体移动概率 = g0 × (1-g19)，显著降低。
+
+        用个体 ID 追踪移动（而非数组索引）：死亡/出生会重排索引、
+        子代追加到尾部，按索引对比会产生大量"假移动"。
+        """
         e = _make(seed=12, n=30)
         e._genes[:, 0] = 1.0
         e._genes[:15, 19] = 1.0  # 前半完全扎根
         e._genes[15:, 19] = 0.0  # 后半正常
         e._energy[:] = 200.0  # 充足能量避免死亡干扰
-        moves_plant = 0
-        moves_normal = 0
+        is_plant = {int(i): (k < 15) for k, i in enumerate(e._id)}
+        moves = {"plant": 0, "normal": 0}
         for _ in range(50):
-            before = e._flat.copy()
+            prev = {int(i): int(f) for i, f in zip(e._id, e._flat)}
             e.step()
-            n = min(len(before), len(e._flat))
-            moved = before[:n] != e._flat[:n]
-            moves_plant += int(moved[:15].sum())
-            moves_normal += int(moved[15:30].sum())
-        assert moves_plant < moves_normal * 0.3
+            for i, f in zip(e._id, e._flat):
+                old = prev.get(int(i))
+                if old is not None and old != int(f):
+                    moves["plant" if is_plant[int(i)] else "normal"] += 1
+        assert moves["plant"] < moves["normal"] * 0.3, dict(moves)
 
     def test_plant_boosts_photosynthesis(self):
         """g19 高的个体在光照下获得更多光合能量。"""

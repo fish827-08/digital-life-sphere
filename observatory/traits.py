@@ -18,7 +18,9 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-# 14 个基因位的语义名（与引擎 _genes 列一一对应；索引即基因序号）。
+# 24 个基因位的语义名（与引擎 _genes 列一一对应；索引即基因序号）。
+# g14~g23 为 L2/L4 大改造新增；其中 g17/g18/g20~g23 引擎未接线（预留位），
+# trait 表仍如实列出，便于观察台跟踪其漂移。
 GENE_TRAIT_NAMES: tuple[str, ...] = (
     "move_prob",          # g0  移动概率
     "metabolic",          # g1  代谢倍率（消化快慢）
@@ -34,6 +36,16 @@ GENE_TRAIT_NAMES: tuple[str, ...] = (
     "temp_pref",          # g11 温度偏好
     "repro_cooldown",     # g12 繁殖冷却长度
     "sociability",        # g13 群居性
+    "perception",         # g14 感知半径（移动决策邻居深度，L3）
+    "signal_strength",    # g15 信号发射概率（L3）
+    "aggression",         # g16 攻击性（捕食概率，L4）
+    "diet",               # g17 食性（未接线，预留）
+    "defense",            # g18 防御（未接线，预留）
+    "rooting",            # g19 植物化扎根（移动概率 ×(1-g19) + 额外光合，L4）
+    "hedonism",           # g20 享乐敏感（未接线，预留）
+    "processing",         # g21 处理位（未接线，预留）
+    "trust_gene",         # g22 信任阈值（未接线，预留）
+    "reserved",           # g23 预留
 )
 
 # 派生 trait：由基因 + 环境基准（一昼夜 tick 数）解码，非独立基因位。
@@ -59,8 +71,9 @@ def decode_trait_matrix(
 
     参数
     ----
-    genes : NDArray, 形状 (n, 16)
-        引擎的基因链（每行一个个体，前 14 位参与 trait 解码）。
+    genes : NDArray, 形状 (n, n_genes)
+        引擎的基因链（每行一个个体；n_genes 可小于 GENE_TRAIT_NAMES 长度，
+        如旧存档的 16 基因配置——只解码存在的列）。
     day_length : float
         一昼夜的 tick 数（light.rotation_period），派生 trait 的基准。
 
@@ -70,8 +83,9 @@ def decode_trait_matrix(
         按 TRAIT_ORDER 排列的 trait 值矩阵（基因位原样 + 派生列）。
     """
     n = genes.shape[0]
+    n_trait_cols = min(len(GENE_TRAIT_NAMES), genes.shape[1])
     cols: list[NDArray[np.float64]] = [
-        genes[:, i].astype(np.float64) for i in range(len(GENE_TRAIT_NAMES))
+        genes[:, i].astype(np.float64) for i in range(n_trait_cols)
     ]
     for _, fn in _DERIVED_TRAITS:
         cols.append(np.asarray(fn(genes, day_length), dtype=np.float64))

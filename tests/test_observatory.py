@@ -22,8 +22,8 @@ from simulation.sphere_engine import SphereEngine
 
 
 def test_trait_order_length() -> None:
-    # 14 基因位 + 3 派生 trait = 17 列
-    assert len(TRAIT_ORDER) == 17
+    # 24 基因 trait + 3 派生 trait = 27 列
+    assert len(TRAIT_ORDER) == 27  # 24 基因 trait + 3 派生 trait
     assert TRAIT_ORDER[:3] == ("move_prob", "metabolic", "repro_threshold")
     assert TRAIT_ORDER[-3:] == ("life_span", "metabolic_mult", "maturity_age")
 
@@ -32,10 +32,11 @@ def test_decode_trait_matrix_shape() -> None:
     rng = np.random.default_rng(3)
     genes = rng.uniform(0.0, 1.0, size=(10, 16))
     traits = decode_trait_matrix(genes, day_length=2400.0)
-    assert traits.shape == (10, 17)
+    # 16 基因输入：16 列基因 trait + 3 派生 = 19 列（列数保护：只解码存在的列）
+    assert traits.shape == (10, 19)
     # 派生列与公式一致（与引擎 _lifespan/metab_mult/maturity 同一公式）
-    assert np.allclose(traits[:, 14], 2400.0 * (1.0 + genes[:, 3] * 7.0))
-    assert np.allclose(traits[:, 15], 0.5 + genes[:, 1] * 1.5)
+    assert np.allclose(traits[:, 16], 2400.0 * (1.0 + genes[:, 3] * 7.0))
+    assert np.allclose(traits[:, 17], 0.5 + genes[:, 1] * 1.5)
 
 
 def test_generation_statistics_empty() -> None:
