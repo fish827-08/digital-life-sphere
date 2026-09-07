@@ -113,6 +113,7 @@ class SphereEngine:
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
+        "_fruit_grid", "_fruit_charge", "_seed_carried",  # L10a
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -236,6 +237,12 @@ class SphereEngine:
             pcfg.optimism * pcfg.max_reward,
             dtype=np.float64,
         )
+
+        # L10a 果实-种子传播（默认关闭，fruit.enabled=False 时不执行）
+        fcfg = self.config.fruit
+        self._fruit_grid = np.zeros(self.world.n_cells, dtype=np.float64)  # 每格果实能量
+        self._fruit_charge = np.zeros(n, dtype=np.float64)  # 每植物的果实蓄力
+        self._seed_carried = np.zeros(n, dtype=np.int32)  # 每动物携带种子数（L10b 完善）
 
         # 出生位置：均匀随机格（不做地形障碍过滤，球面无障碍）
         self._flat = self.rng.integers(0, self.world.n_cells, size=n).astype(
@@ -487,6 +494,10 @@ class SphereEngine:
             * ocfg.photo_max
         )
 
+        # 3.5) L10a 植物蓄力→结果（默认关闭；确定性数值管线，Rust 可下沉）
+        if self.config.fruit.enabled:
+            self._step_fruit_charge(P, genes)
+
         # 4) 进食：从格子里吃进胃（先吃后扣基础维持，保证当天能吃到）
         #    饱食度：胃容量上限（基础 = max_energy/eat_efficiency/2，g5 缩放 0.5~2 倍）
         #    进食量：每 tick 最多 eat_amount（g4 缩放 0.5~1.5 倍）
@@ -577,6 +588,10 @@ class SphereEngine:
                     n_bit = (dens[e_flat] > 1).astype(np.int64)
                     patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
                     self.signals.write_many(e_flat, patterns)
+
+        # 4.5) L10a 动物吃果实→能量转移（默认关闭；确定性数值管线，Rust 可下沉）
+        if self.config.fruit.enabled:
+            self._step_eat_fruit(P, energy, genes)
 
         # 5) 移动：g19 植物化降低移动概率（g0 × (1-g19)）
         #    use_sim_core=True：移动决策下沉到 Rust（step_movement），移动耗能在 Rust 内扣；
@@ -902,6 +917,9 @@ class SphereEngine:
             )
             # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体，Rust 路径已算好）
             self._interpret = np.concatenate([self._interpret, child_interp])
+            # L10a：子代果实蓄力清零，种子携带清零
+            self._fruit_charge = np.concatenate([self._fruit_charge, np.zeros(K, dtype=np.float64)])
+            self._seed_carried = np.concatenate([self._seed_carried, np.zeros(K, dtype=np.int32)])
             born = K
             new_max = int(self._generation.max())
             if new_max > self._max_generation:
@@ -953,10 +971,113 @@ class SphereEngine:
             self._interpret = np.concatenate(
                 [self._interpret[:P][keep], self._interpret[P:]]
             )
+            # L10a：果实蓄力/种子携带同步清理
+            self._fruit_charge = np.concatenate(
+                [self._fruit_charge[:P][keep], self._fruit_charge[P:]]
+            )
+            self._seed_carried = np.concatenate(
+                [self._seed_carried[:P][keep], self._seed_carried[P:]]
+            )
 
         if len(self._id) == 0:
             self._extinct = True
         return born, n_starved + n_expired + n_predation, Counter(deaths)
+
+    # ---- L10a 果实-种子传播（数值管线先行版） -----------------------------
+
+    def _step_fruit_charge(self, P: int, genes: NDArray[np.float64]) -> None:
+        """植物蓄力→结果（L10a 步骤 3.5）。
+
+        植物判定：g19(ROOTING) >= plant_threshold。
+        蓄力：每 tick += charge_rate × g8(PHOTOSYNTHESIS)。
+        释放：蓄力 >= fruit_threshold 时，在当前格释放果实：
+            fruit_grid[cell] += charge × fruit_ratio
+            charge = 0
+        纯确定性数值计算，无随机数，可下沉 Rust。
+        """
+        fcfg = self.config.fruit
+        g19 = genes[:P, int(Gene.ROOTING)]
+        g8 = genes[:P, int(Gene.PHOTOSYNTHESIS)]
+        plant_mask = g19 >= fcfg.plant_threshold
+        if not plant_mask.any():
+            return
+
+        if self._use_sim_core:
+            # L10a C5：蓄力→结果下沉 Rust，双路径逐位一致
+            self._sim_core.fruit_charge(
+                self._flat[:P], genes[:P].reshape(-1), self.config.genome.gene_count,
+                self._fruit_charge[:P], self._fruit_grid,
+                int(Gene.ROOTING), int(Gene.PHOTOSYNTHESIS),
+                fcfg.plant_threshold, fcfg.charge_rate, fcfg.fruit_threshold, fcfg.fruit_ratio,
+            )
+            return
+
+        # 蓄力
+        self._fruit_charge[:P][plant_mask] += fcfg.charge_rate * g8[plant_mask]
+
+        # 释放判定
+        ripe = plant_mask & (self._fruit_charge[:P] >= fcfg.fruit_threshold)
+        if not ripe.any():
+            return
+
+        ripe_flat = self._flat[:P][ripe]
+        ripe_charge = self._fruit_charge[:P][ripe]
+
+        # 果实能量释放到格子（多植物同格累加）
+        fruit_add = ripe_charge * fcfg.fruit_ratio
+        np.add.at(self._fruit_grid, ripe_flat, fruit_add)
+
+        # 蓄力清零
+        self._fruit_charge[:P][ripe] = 0.0
+
+    def _step_eat_fruit(self, P: int, energy: NDArray[np.float64],
+                         genes: NDArray[np.float64]) -> None:
+        """动物吃果实→能量转移（L10a 步骤 4.5）。
+
+        动物判定：g19(ROOTING) < plant_threshold（非植物）。
+        吃果实：当前格有果实（fruit_grid[cell] > 0）时，
+            eat_amount = min(fruit_grid[cell] × eat_rate, stomach剩余空间)
+            energy += eat_amount × digest_ratio
+            fruit_grid[cell] -= eat_amount
+        纯确定性数值计算，无随机数，可下沉 Rust。
+        种子摄入（L10b）：本次先行版不实现，_seed_carried 保持 0。
+        """
+        fcfg = self.config.fruit
+        g19 = genes[:P, int(Gene.ROOTING)]
+        animal_mask = g19 < fcfg.plant_threshold
+        if not animal_mask.any():
+            return
+
+        if self._use_sim_core:
+            # L10a C5：吃果实→能量转移下沉 Rust，双路径逐位一致
+            self._sim_core.eat_fruit(
+                self._flat[:P], genes[:P].reshape(-1), self.config.genome.gene_count,
+                energy[:P], self._fruit_grid,
+                int(Gene.ROOTING),
+                fcfg.plant_threshold, fcfg.eat_rate, fcfg.digest_ratio,
+            )
+            return
+
+        animal_flat = self._flat[:P][animal_mask]
+        cell_fruit = self._fruit_grid[animal_flat]
+        has_fruit = cell_fruit > 0
+        if not has_fruit.any():
+            return
+
+        # 吃果实量：格子果实 × eat_rate
+        eat_amount = cell_fruit[has_fruit] * fcfg.eat_rate
+
+        # 能量转移（注意：布尔索引链式 [animal_mask][has_fruit] 返回副本，
+        # 必须用 flatnonzero 拿到原始索引才能就地修改）
+        animal_idx = np.flatnonzero(animal_mask)
+        eat_idx = animal_idx[has_fruit]
+        energy[eat_idx] += eat_amount * fcfg.digest_ratio
+
+        # 果实场减少（同格多动物累加扣减）
+        eat_flat = animal_flat[has_fruit]
+        np.add.at(self._fruit_grid, eat_flat, -eat_amount)
+        # 防止浮点误差导致负值
+        self._fruit_grid[self._fruit_grid < 0] = 0.0
 
     # ---- 愉悦度系统（L2） --------------------------------------------------
 

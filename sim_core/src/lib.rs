@@ -25,6 +25,7 @@ mod regrow;
 mod reproduction;
 mod signal;
 mod step_vectors;
+mod dispersal;
 
 /// 基因位索引常量（与 Python simulation.genes 注册表对应），供绑定层对外导出
 // 说明：常量定义在 genes.rs（G_MOVE_PROB 等），这里仅 re-export 供 Python 侧
@@ -108,6 +109,68 @@ fn validate_gene_wiring(
         }
     }
     drift
+}
+
+/// fruit_charge：植物蓄力→结果（L10a 步骤 3.5），确定性数值管线下沉。
+///
+/// genes 为 (P, gene_count) 展平的一维数组；fruit_charge/fruit_grid 就地修改。
+#[pyfunction]
+fn fruit_charge(
+    flat: PyReadonlyArray1<'_, i64>,
+    genes: PyReadonlyArray1<'_, f64>,
+    gene_count: usize,
+    fruit_charge: Bound<'_, PyArray1<f64>>,
+    fruit_grid: Bound<'_, PyArray1<f64>>,
+    g19_idx: usize,
+    g8_idx: usize,
+    plant_threshold: f64,
+    charge_rate: f64,
+    fruit_threshold: f64,
+    fruit_ratio: f64,
+) -> PyResult<()> {
+    let p = flat.as_array().len();
+    require_len("genes", genes.as_array().len(), p * gene_count)?;
+    require_len("fruit_charge", unsafe { fruit_charge.as_array().len() }, p)?;
+
+    let mut fc = unsafe { fruit_charge.as_slice_mut()? };
+    let mut fg = unsafe { fruit_grid.as_slice_mut()? };
+
+    dispersal::fruit_charge_batch(
+        flat.as_slice()?, genes.as_slice()?, gene_count,
+        &mut fc, &mut fg,
+        g19_idx, g8_idx, plant_threshold, charge_rate, fruit_threshold, fruit_ratio,
+    );
+    Ok(())
+}
+
+/// eat_fruit：动物吃果实→能量转移（L10a 步骤 4.5），确定性数值管线下沉。
+///
+/// genes 为 (P, gene_count) 展平；energy/fruit_grid 就地修改。
+#[pyfunction]
+fn eat_fruit(
+    flat: PyReadonlyArray1<'_, i64>,
+    genes: PyReadonlyArray1<'_, f64>,
+    gene_count: usize,
+    energy: Bound<'_, PyArray1<f64>>,
+    fruit_grid: Bound<'_, PyArray1<f64>>,
+    g19_idx: usize,
+    plant_threshold: f64,
+    eat_rate: f64,
+    digest_ratio: f64,
+) -> PyResult<()> {
+    let p = flat.as_array().len();
+    require_len("genes", genes.as_array().len(), p * gene_count)?;
+    require_len("energy", unsafe { energy.as_array().len() }, p)?;
+
+    let mut e = unsafe { energy.as_slice_mut()? };
+    let mut fg = unsafe { fruit_grid.as_slice_mut()? };
+
+    dispersal::eat_fruit_batch(
+        flat.as_slice()?, genes.as_slice()?, gene_count,
+        &mut e, &mut fg,
+        g19_idx, plant_threshold, eat_rate, digest_ratio,
+    );
+    Ok(())
 }
 
 /// regrow：资源场再生（3.2）。
@@ -896,6 +959,8 @@ fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reproduce_batch, m)?)?;
     m.add_function(wrap_pyfunction!(signal_emit, m)?)?;
     m.add_function(wrap_pyfunction!(pleasure_update, m)?)?;
+    m.add_function(wrap_pyfunction!(fruit_charge, m)?)?;
+    m.add_function(wrap_pyfunction!(eat_fruit, m)?)?;
     m.add_function(wrap_pyfunction!(native_gene_indicators, m)?)?;
     m.add_function(wrap_pyfunction!(validate_gene_wiring, m)?)?;
     Ok(())

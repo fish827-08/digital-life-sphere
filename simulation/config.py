@@ -229,6 +229,41 @@ class CultureConfig:
 
 
 @dataclass
+class FruitConfig:
+    """果实-种子传播参数（L10a，植物-动物协同进化）。
+
+    核心链路：植物蓄力→结果→动物吃果实→摄入种子→排泄→萌发新植物。
+    默认 enabled=False（不改变现有行为），开启后新增果实场/蓄力/种子携带状态。
+    """
+
+    enabled: bool = False              # 总开关（False 时完全不执行 L10 步骤）
+    plant_threshold: float = 0.5       # g19 >= 此值判定为植物（会结果）
+    charge_rate: float = 0.1           # 每 tick 蓄力速率（× g8 光合产能）
+    fruit_threshold: float = 10.0      # 蓄力达此值→结果释放
+    fruit_ratio: float = 0.8           # 释放到果实场的能量比例（其余损耗）
+    eat_rate: float = 0.05             # 动物每 tick 吃果实比例（× 果实能量）
+    digest_ratio: float = 0.7          # 吃果实的能量消化率
+    seed_intake_prob: float = 0.3      # 吃果实时摄入种子的概率
+    excretion_prob: float = 0.1         # 携带种子每 tick 排泄概率
+    germination_prob: float = 0.5       # 排泄后种子萌发概率
+    seed_energy: float = 5.0            # 萌发新植物的初始能量
+    max_seed_carried: int = 5           # 单个体最大携带种子数
+
+    def __post_init__(self) -> None:
+        assert 0.0 <= self.plant_threshold <= 1.0
+        assert self.charge_rate >= 0
+        assert self.fruit_threshold > 0
+        assert 0.0 <= self.fruit_ratio <= 1.0
+        assert 0.0 <= self.eat_rate <= 1.0
+        assert 0.0 <= self.digest_ratio <= 1.0
+        assert 0.0 <= self.seed_intake_prob <= 1.0
+        assert 0.0 <= self.excretion_prob <= 1.0
+        assert 0.0 <= self.germination_prob <= 1.0
+        assert self.seed_energy > 0
+        assert self.max_seed_carried >= 0
+
+
+@dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
 
@@ -243,6 +278,7 @@ class SimConfig:
     pleasure: PleasureConfig = field(default_factory=PleasureConfig)
     predation: PredationConfig = field(default_factory=PredationConfig)
     culture: CultureConfig = field(default_factory=CultureConfig)
+    fruit: FruitConfig = field(default_factory=FruitConfig)
 
     # ---- 可复现性辅助：配置 ⇄ dict ------------------------------
 
@@ -281,6 +317,12 @@ class SimConfig:
                 CultureConfig(**data["culture"])
                 if "culture" in data
                 else CultureConfig()
+            ),
+            # L10a 新增果实-种子传播配置；旧存档回退默认值（enabled=False）。
+            fruit=(
+                FruitConfig(**data["fruit"])
+                if "fruit" in data
+                else FruitConfig()
             ),
         )
 
