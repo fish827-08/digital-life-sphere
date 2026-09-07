@@ -558,8 +558,18 @@ class SphereEngine:
         #     rand_emit 在 Python 侧预生成，保证 RNG 消费顺序与纯 Python 一致。
         signal_gene = genes[:, Gene.SIGNAL_STRENGTH]
         rand_emit = self.rng.random(P)  # 双路径共用：Python 直接用，Rust 传入
+        # 方案A：食物丰富格（>50%容量）上的个体发射概率提升
+        # 等效于 rand_emit < signal_gene * mult，让信号指向"这里有食物"（指代性）
+        if ocfg.signal_food_emit_mult > 1.0:
+            cur_flat_sig = self._flat[:P]
+            food_rich_sig = (
+                self.resources._grid[cur_flat_sig]
+                > 0.5 * self.resources._capacity[cur_flat_sig]
+            )
+            rand_emit = rand_emit.copy()
+            rand_emit[food_rich_sig] /= ocfg.signal_food_emit_mult
         if self._use_sim_core:
-            SIGNAL_COST = 0.1
+            SIGNAL_COST = ocfg.signal_emit_cost
             dens = np.bincount(self._flat[:P], minlength=self.world.n_cells).astype(np.float64)
             self._sim_core.signal_emit(
                 self._flat[:P], energy, signal_gene.copy(), rand_emit,
@@ -570,7 +580,7 @@ class SphereEngine:
         else:
             emitters = np.flatnonzero(rand_emit < signal_gene)
             if len(emitters):
-                SIGNAL_COST = 0.1  # 发射成本（降低，让信号基因不被纯成本淘汰）
+                SIGNAL_COST = ocfg.signal_emit_cost
                 can_afford = energy[emitters] >= SIGNAL_COST
                 emitters = emitters[can_afford]
                 if len(emitters):
@@ -818,7 +828,18 @@ class SphereEngine:
         K = min(int(repro.sum()), self.config.population.max_count - P)
         born = 0
         if K > 0:
-            ri = np.flatnonzero(repro)[:K]
+            # 方案A：繁殖选择按 energy×(1+mate_trust_weight×trust) 加权
+            # trust 高者（善于利用信号找到食物）繁衍优势，形成信号-信任-繁衍正反馈
+            candidates = np.flatnonzero(repro)
+            if ocfg.mate_trust_weight > 0 and K < len(candidates):
+                weights = energy[candidates] * (
+                    1.0 + ocfg.mate_trust_weight * self._trust[candidates]
+                )
+                weights = weights / weights.sum()
+                ri = self.rng.choice(candidates, size=K, replace=False, p=weights)
+                ri.sort()  # 保持数组顺序，减少后续代码假设
+            else:
+                ri = candidates[:K]
             if self._use_sim_core:
                 # ---- Rust 路径（T4 L7b）：reproduce_batch 一次性算完基因/能量/文化继承 ----
                 # RNG 顺序必须与 Python 参考路径逐位一致：

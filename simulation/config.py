@@ -101,6 +101,16 @@ class OrganismConfig:
     niche_floor: float = 0.4
     niche_gain: float = 0.6
 
+    # === 信号-语言涌现关键环（方案A）===
+    # 成本端：降低发射能耗（原硬编码0.1→0.05），保留适度诚实成本防欺骗
+    signal_emit_cost: float = 0.05
+    # 收益端1：食物丰富格（>50%容量）上的个体发射概率倍率
+    # 让信号指向"这里有食物"，产生指代性
+    signal_food_emit_mult: float = 3.0
+    # 收益端2：繁殖选择中 trust 的权重
+    # trust 高者（善于利用信号找到食物）繁衍优势，形成正反馈
+    mate_trust_weight: float = 0.3
+
     def __post_init__(self) -> None:
         assert self.initial_energy < self.max_energy, "初始能量要小于上限"
         assert self.eat_amount > 0, "进食量上限为正"
@@ -111,6 +121,9 @@ class OrganismConfig:
         )
         assert self.growth_mult >= 1.0, "幼体代谢倍率至少 1"
         assert self.senile_mult >= 1.0, "老年代谢倍率至少 1"
+        assert self.signal_emit_cost >= 0, "信号发射能耗非负"
+        assert self.signal_food_emit_mult >= 1.0, "食物信号发射倍率至少1"
+        assert self.mate_trust_weight >= 0, "繁殖trust权重非负"
 
 
 @dataclass
