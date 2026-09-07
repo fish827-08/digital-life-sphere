@@ -543,27 +543,40 @@ class SphereEngine:
 
         # 4.5) 信号发射（g15）：以基因概率在当前格写入田字格标记，耗能
         #     模式 = 状态哈希（能量2位 + 食物1位 + 邻居1位 = 4位=16种）
+        #     use_sim_core=True：下沉到 Rust signal_emit（L7a C1），
+        #     rand_emit 在 Python 侧预生成，保证 RNG 消费顺序与纯 Python 一致。
         signal_gene = genes[:, Gene.SIGNAL_STRENGTH]
-        emitters = np.flatnonzero(self.rng.random(P) < signal_gene)
-        if len(emitters):
-            SIGNAL_COST = 0.1  # 发射成本（降低，让信号基因不被纯成本淘汰）
-            can_afford = energy[emitters] >= SIGNAL_COST
-            emitters = emitters[can_afford]
+        rand_emit = self.rng.random(P)  # 双路径共用：Python 直接用，Rust 传入
+        if self._use_sim_core:
+            SIGNAL_COST = 0.1
+            dens = np.bincount(self._flat[:P], minlength=self.world.n_cells).astype(np.float64)
+            self._sim_core.signal_emit(
+                self._flat[:P], energy, signal_gene.copy(), rand_emit,
+                dens, self.resources._grid, self.resources._capacity,
+                self.signals._marks, self.signals._age,
+                SIGNAL_COST, ocfg.max_energy, self.signals.duration,
+            )
+        else:
+            emitters = np.flatnonzero(rand_emit < signal_gene)
             if len(emitters):
-                energy[emitters] -= SIGNAL_COST
-                e_flat = self._flat[emitters]
-                # 模式编码：能量档(2位,bit3-2) + 食物(1位,bit1) + 邻居(1位,bit0)
-                e_bin = np.clip(
-                    (energy[emitters] / max(1e-9, ocfg.max_energy) * 4).astype(np.int64), 0, 3
-                )
-                f_bit = (
-                    self.resources._grid[e_flat]
-                    > 0.5 * self.resources._capacity[e_flat]
-                ).astype(np.int64)
-                dens = np.bincount(self._flat[:P], minlength=self.world.n_cells)
-                n_bit = (dens[e_flat] > 1).astype(np.int64)
-                patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
-                self.signals.write_many(e_flat, patterns)
+                SIGNAL_COST = 0.1  # 发射成本（降低，让信号基因不被纯成本淘汰）
+                can_afford = energy[emitters] >= SIGNAL_COST
+                emitters = emitters[can_afford]
+                if len(emitters):
+                    energy[emitters] -= SIGNAL_COST
+                    e_flat = self._flat[emitters]
+                    # 模式编码：能量档(2位,bit3-2) + 食物(1位,bit1) + 邻居(1位,bit0)
+                    e_bin = np.clip(
+                        (energy[emitters] / max(1e-9, ocfg.max_energy) * 4).astype(np.int64), 0, 3
+                    )
+                    f_bit = (
+                        self.resources._grid[e_flat]
+                        > 0.5 * self.resources._capacity[e_flat]
+                    ).astype(np.int64)
+                    dens = np.bincount(self._flat[:P], minlength=self.world.n_cells)
+                    n_bit = (dens[e_flat] > 1).astype(np.int64)
+                    patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
+                    self.signals.write_many(e_flat, patterns)
 
         # 5) 移动：g19 植物化降低移动概率（g0 × (1-g19)）
         #    use_sim_core=True：移动决策下沉到 Rust（step_movement），移动耗能在 Rust 内扣；
@@ -925,6 +938,21 @@ class SphereEngine:
         idx = np.arange(P)
         flat = self._flat[:P]
         energy_now = self._energy[:P]
+
+        if self._use_sim_core:
+            # L7a C2：愉悦度更新下沉 Rust，双路径逐位一致
+            densities = np.bincount(flat, minlength=self.world.n_cells).astype(np.float64)
+            self._sim_core.pleasure_update(
+                flat, energy_now, energy_before,
+                densities, self.resources._grid, self.resources._capacity,
+                self.signals._marks,
+                self._valence[:P], self._arousal[:P],
+                self._expectation[:P].reshape(-1), self._baseline[:P],
+                max_e, pcfg.alpha, pcfg.valence_decay, pcfg.arousal_decay,
+                pcfg.baseline_rate, pcfg.max_reward,
+                pcfg.w_energy, pcfg.w_info, pcfg.w_social,
+            )
+            return
 
         # 1) 情境编码
         # 能量档：energy/max_energy → 0~4

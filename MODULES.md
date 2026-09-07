@@ -499,3 +499,89 @@ cfg.simulation.use_sim_core = True   # 需要先构建：sim_core/ 下运行 .ve
 |---------|------|
 | `tests/test_observatory.py` | trait 表口径（17 列/派生公式）；空种群全零观测点；observer 采样连续性；run_single 冒烟/确定性复现/overrides 合并/灭绝专项；config roundtrip；持久化 roundtrip（manifest+CSV） |
 | `tests/test_broker.py` | 节拍采集（tick 100/200/300）；环形缓冲有界；JSON 可序列化；广播带个体明细；WebSocket 端到端推流（兜底+推流 ≥2 份）；无客户端也正常跑完 |
+---
+
+## 模块五：基因系统扩展性（simulation/genes.py + sim_core/src/genes.rs）
+
+> C3 基因扩展性（G1~G4），2026-09-07 实现。目标：新增基因位有标准化流程，
+> Python↔Rust 双写不漂移，预留位有明确接管规则，元数据供观察台消费。
+
+### G1：加基因五步曲（新增基因位的标准流程）
+
+新增一个基因位（例如 g24 新性状）必须按以下顺序执行，缺一不可：
+
+1. **Python 注册表追加**：`simulation/genes.py` 的 `Gene` 枚举末尾追加成员
+   （`NEW_TRAIT = 24`），同步更新 `GENE_SEMANTICS`（功能说明）、
+   `GENE_META`（mutation_scale + selection_direction）、`GENE_WIRED`（如已接线）。
+   `GENE_COUNT` 自动 = len(Gene)，无需手动改。
+
+2. **Rust 常量追加**：`sim_core/src/genes.rs` 末尾追加同名常量
+   （`pub const G_NEW_TRAIT: usize = 24;`），注释写清语义。
+   **必须与 Python 侧值完全一致**，否则 `validate_gene_wiring()` 报错。
+
+3. **lib.rs 校验列表追加**：`sim_core/src/lib.rs` 的 `validate_gene_wiring` 函数中
+   `rust_all` 向量末尾追加 `("G_NEW_TRAIT", G_NEW_TRAIT)`。
+   这是漂移检测的关键——漏掉这一步，该基因的双写漂移不会被发现。
+
+4. **引擎消费**：在 `simulation/sphere_engine.py` 对应步骤中用 `Gene.NEW_TRAIT`
+   （而非裸数字 24）消费该基因。如需 Rust 下沉，在对应 Rust 模块中用
+   `crate::genes::G_NEW_TRAIT`。
+
+5. **测试 + 验证**：
+   - 跑 `tests/test_genes_registry.py`（18 项，含 24 基因逐个篡改检测）；
+   - 跑全量 `pytest tests/` 确认无回归；
+   - 如改了 Rust，重新编译 `sim_core.so`；
+   - 更新 `PROGRESS.md` 记录新基因。
+
+**禁止**：直接改已有基因的索引值（会破坏所有存档和对拍）；
+在枚举中间插入新基因（必须末尾追加）；只改 Python 不改 Rust（漂移）。
+
+### G2：双写漂移检测（validate_gene_wiring）
+
+- `simulation/genes.py::validate_gene_wiring()` → 调用 Rust 侧
+  `sim_core.validate_gene_wiring(py_names, py_values)`，逐位对照 24 个基因的
+  (name, value)，返回不一致列表 `[(name, rust_val, py_val), ...]`。
+- 空列表 = 全部一致；非空 = 存在漂移。
+- `tests/test_genes_registry.py::TestGeneWiringValidation` 覆盖：
+  正常无漂移 / 改值检测 / 改名检测 / 数量不匹配 / **24 基因逐个篡改都能被检测**。
+- 引擎初始化时（use_sim_core=True）应调用此函数，漂移则直接报错（防静默错误）。
+
+### G3：基因元数据（GENE_META）
+
+`GENE_META: tuple[GeneMeta, ...]`，与 `GENE_SEMANTICS` 平行，index = 列索引。
+每基因两个字段（纯扩展，不改变引擎行为，供观察台/分析工具消费）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `mutation_scale` | float | 突变标准差（高斯突变 σ）。核心基因（代谢/寿命）保守（0.02~0.05），探索性基因（信号/感知/群居）宽松（0.08~0.10），预留位默认 0.10 |
+| `selection_direction` | int | 选择方向标注：+1=高值正向选择，-1=低值负向选择，0=中性/环境依赖。仅作观察台标注，引擎不强制（选择压来自生态动力学） |
+
+访问函数：`gene_meta(idx) -> GeneMeta`，越界抛 IndexError。
+
+### G4：预留位接管规则
+
+当前 24 位基因中，**已接线 18 位**（g0~g16, g19），**预留位 6 位**：
+
+| 预留位 | 语义名 | 建议用途 | 优先级 |
+|--------|--------|---------|--------|
+| g17 | DIET | 食性（肉食/植食/杂食连续谱） | 高（L8 地形+捕食扩展时用） |
+| g18 | DEFENSE | 防御（被攻击时的减伤/逃跑概率） | 高（L4 捕食扩展时用） |
+| g20 | HEDONISM | 享乐敏感度（愉悦度系统的响应增益） | 中（愉悦度扩展时用） |
+| g21 | PROCESSING | 处理位（认知/决策延迟，类工作记忆容量） | 中（语言涌现扩展时用） |
+| g22 | TRUST_GENE | 信任阈值（对信号的初始信任/学习率） | 中（L5 信任扩展时用） |
+| g23 | RESERVED | 通用预留 | 低（最后使用） |
+
+**接管规则**：
+1. **优先复用预留位，耗尽前不扩 gene_count**。新增性状时先检查上表，
+   有合适的预留位就接管（改语义名+接线），不要直接扩到 25 位。
+2. **接管 = 改语义 + 接线 + 更新元数据**：把 `GENE_SEMANTICS` 从"（预留）"
+   改成实际功能，加入 `GENE_WIRED`，调整 `GENE_META` 的 mutation_scale。
+   索引值不变（存档兼容）。
+3. **6 个预留位全部耗尽后才允许扩 gene_count**（24→25）。扩位时：
+   - 必须在 `Gene` 枚举末尾追加（不在中间插入）；
+   - 同步 Rust 常量 + lib.rs 校验列表；
+   - **触发存档格式升级提示**：快照文件的 `gene_count` 元数据会变化，
+     `load_snapshot` 已校验 gene_count，旧快照无法直接加载（需迁移脚本）；
+   - 在 `PROGRESS.md` 记录扩位事件和兼容性说明。
+4. **预留位在未接管前仍参与进化**（观察台跟踪漂移），但引擎不消费，
+   因此对适应度无直接影响（中性漂变）。

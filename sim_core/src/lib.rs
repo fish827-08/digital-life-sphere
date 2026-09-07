@@ -19,9 +19,11 @@ mod culture;
 mod genes;
 mod l4_l5;
 mod movement;
+mod pleasure;
 mod predation;
 mod regrow;
 mod reproduction;
+mod signal;
 mod step_vectors;
 
 /// 基因位索引常量（与 Python simulation.genes 注册表对应），供绑定层对外导出
@@ -45,6 +47,67 @@ fn native_gene_indicators() -> Vec<(String, usize)> {
         (stringify!(G_PERCEPTION).to_string(), G_PERCEPTION),
         (stringify!(G_AGGRESSION).to_string(), G_AGGRESSION),
     ]
+}
+
+/// 完整基因双写校验：Python 侧传入全部基因的 (name, value)，与 Rust 侧常量逐位对照。
+///
+/// 返回不一致列表 [(name, rust_value, py_value), ...]；空列表表示全部一致。
+/// 用于 tests/test_genes_registry.py 的漂移检测：故意改一侧索引→此函数返回非空。
+#[pyfunction]
+fn validate_gene_wiring(
+    py_names: Vec<String>,
+    py_values: Vec<usize>,
+) -> Vec<(String, usize, usize)> {
+    use crate::genes::*;
+    // Rust 侧全部常量（与 genes.rs 一一对应，新增基因时必须同步追加）
+    let rust_all: Vec<(&str, usize)> = vec![
+        ("G_MOVE_PROB", G_MOVE_PROB),
+        ("G_METABOLIC", G_METABOLIC),
+        ("G_REPRO_THRESHOLD", G_REPRO_THRESHOLD),
+        ("G_LIFE_GENE", G_LIFE_GENE),
+        ("G_EAT_AMOUNT", G_EAT_AMOUNT),
+        ("G_STOMACH_CAP", G_STOMACH_CAP),
+        ("G_MOVE_COST", G_MOVE_COST),
+        ("G_PARENTAL_INVEST", G_PARENTAL_INVEST),
+        ("G_PHOTOSYNTHESIS", G_PHOTOSYNTHESIS),
+        ("G_HOMEOTHERM", G_HOMEOTHERM),
+        ("G_FORAGE_NEIGHBOR", G_FORAGE_NEIGHBOR),
+        ("G_TEMP_PREF", G_TEMP_PREF),
+        ("G_REPRO_COOLDOWN", G_REPRO_COOLDOWN),
+        ("G_SOCIABILITY", G_SOCIABILITY),
+        ("G_PERCEPTION", G_PERCEPTION),
+        ("G_SIGNAL_STRENGTH", G_SIGNAL_STRENGTH),
+        ("G_AGGRESSION", G_AGGRESSION),
+        ("G_DIET", G_DIET),
+        ("G_DEFENSE", G_DEFENSE),
+        ("G_ROOTING", G_ROOTING),
+        ("G_HEDONISM", G_HEDONISM),
+        ("G_PROCESSING", G_PROCESSING),
+        ("G_TRUST_GENE", G_TRUST_GENE),
+        ("G_RESERVED", G_RESERVED),
+    ];
+
+    let mut drift = Vec::new();
+    if py_names.len() != rust_all.len() {
+        // 数量不一致本身就是漂移（但不 panic，返回差异供调用方判断）
+        drift.push((
+            format!("COUNT_MISMATCH(rust={}, py={})", rust_all.len(), py_names.len()),
+            rust_all.len(),
+            py_names.len(),
+        ));
+    }
+    let n = py_names.len().min(rust_all.len());
+    for i in 0..n {
+        let (r_name, r_val) = rust_all[i];
+        let p_name = &py_names[i];
+        let p_val = py_values[i];
+        // 名字比对：Python 侧传 "MOVE_PROB"，Rust 侧是 "G_MOVE_PROB"，去掉 G_ 前缀
+        let r_name_stripped = r_name.strip_prefix("G_").unwrap_or(r_name);
+        if r_name_stripped != p_name.as_str() || r_val != p_val {
+            drift.push((p_name.clone(), r_val, p_val));
+        }
+    }
+    drift
 }
 
 /// regrow：资源场再生（3.2）。
@@ -720,6 +783,105 @@ fn reproduce_batch(
     Ok(())
 }
 
+/// signal_emit：信号发射（L3 g15），批量判定发射、耗能、编码模式、写入信号场。
+///
+/// 语义与 sphere_engine 步骤 4.5 逐位等价。energy/signal_marks/signal_age 就地更新。
+/// rand_emit 由 Python 侧预生成（self.rng.random(P)），保证 RNG 消费顺序一致。
+/// densities 由 Python 侧预计算（np.bincount），与移动下沉共用。
+#[pyfunction]
+fn signal_emit(
+    flat: PyReadonlyArray1<'_, i64>,
+    energy: Bound<'_, PyArray1<f64>>,
+    g15: PyReadonlyArray1<'_, f64>,
+    rand_emit: PyReadonlyArray1<'_, f64>,
+    densities: PyReadonlyArray1<'_, f64>,
+    resource_grid: PyReadonlyArray1<'_, f64>,
+    resource_capacity: PyReadonlyArray1<'_, f64>,
+    signal_marks: Bound<'_, PyArray1<u8>>,
+    signal_age: Bound<'_, PyArray1<i32>>,
+    emit_cost: f64,
+    max_energy: f64,
+    duration: i32,
+) -> PyResult<usize> {
+    let n = flat.as_array().len();
+    require_len("energy", unsafe { energy.as_array().len() }, n)?;
+    require_len("g15", g15.as_array().len(), n)?;
+    require_len("rand_emit", rand_emit.as_array().len(), n)?;
+    let n_cells = densities.as_array().len();
+    require_len("resource_grid", resource_grid.as_array().len(), n_cells)?;
+    require_len("resource_capacity", resource_capacity.as_array().len(), n_cells)?;
+    require_len("signal_marks", unsafe { signal_marks.as_array().len() }, n_cells)?;
+    require_len("signal_age", unsafe { signal_age.as_array().len() }, n_cells)?;
+
+    let mut e = unsafe { energy.as_slice_mut()? };
+    let mut sm = unsafe { signal_marks.as_slice_mut()? };
+    let mut sa = unsafe { signal_age.as_slice_mut()? };
+
+    let n_emit = signal::signal_emit_batch(
+        flat.as_slice()?, &mut e, g15.as_slice()?, rand_emit.as_slice()?,
+        densities.as_slice()?, resource_grid.as_slice()?, resource_capacity.as_slice()?,
+        &mut sm, &mut sa,
+        emit_cost, max_energy, duration,
+    );
+    Ok(n_emit)
+}
+
+/// pleasure_update：愉悦度批量更新（L2 RPE 预测误差驱动），L7a C2 下沉。
+///
+/// 语义与 sphere_engine._update_pleasure 逐位等价。
+/// valence/arousal/expectation/baseline 就地更新。expectation 为 (N,120) 展平。
+/// energy_before 由 Python 侧在 tick 开始时保存（步骤 1 前）。
+#[pyfunction]
+fn pleasure_update(
+    flat: PyReadonlyArray1<'_, i64>,
+    energy_now: PyReadonlyArray1<'_, f64>,
+    energy_before: PyReadonlyArray1<'_, f64>,
+    densities: PyReadonlyArray1<'_, f64>,
+    resource_grid: PyReadonlyArray1<'_, f64>,
+    resource_capacity: PyReadonlyArray1<'_, f64>,
+    signal_marks: PyReadonlyArray1<'_, u8>,
+    valence: Bound<'_, PyArray1<f64>>,
+    arousal: Bound<'_, PyArray1<f64>>,
+    expectation: Bound<'_, PyArray1<f64>>,
+    baseline: Bound<'_, PyArray1<f64>>,
+    max_energy: f64,
+    alpha: f64,
+    valence_decay: f64,
+    arousal_decay: f64,
+    baseline_rate: f64,
+    max_reward: f64,
+    w_energy: f64,
+    w_info: f64,
+    w_social: f64,
+) -> PyResult<()> {
+    let n = flat.as_array().len();
+    require_len("energy_now", energy_now.as_array().len(), n)?;
+    require_len("energy_before", energy_before.as_array().len(), n)?;
+    require_len("valence", unsafe { valence.as_array().len() }, n)?;
+    require_len("arousal", unsafe { arousal.as_array().len() }, n)?;
+    require_len("baseline", unsafe { baseline.as_array().len() }, n)?;
+    require_len("expectation", unsafe { expectation.as_array().len() }, n * 120)?;
+    let n_cells = densities.as_array().len();
+    require_len("resource_grid", resource_grid.as_array().len(), n_cells)?;
+    require_len("resource_capacity", resource_capacity.as_array().len(), n_cells)?;
+    require_len("signal_marks", signal_marks.as_array().len(), n_cells)?;
+
+    let mut v = unsafe { valence.as_slice_mut()? };
+    let mut a = unsafe { arousal.as_slice_mut()? };
+    let mut exp = unsafe { expectation.as_slice_mut()? };
+    let mut bl = unsafe { baseline.as_slice_mut()? };
+
+    pleasure::pleasure_update_batch(
+        flat.as_slice()?, energy_now.as_slice()?, energy_before.as_slice()?,
+        densities.as_slice()?, resource_grid.as_slice()?, resource_capacity.as_slice()?,
+        signal_marks.as_slice()?,
+        &mut v, &mut a, &mut exp, &mut bl,
+        max_energy, alpha, valence_decay, arousal_decay, baseline_rate, max_reward,
+        w_energy, w_info, w_social,
+    );
+    Ok(())
+}
+
 #[pymodule]
 fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(regrow_rs, m)?)?;
@@ -732,6 +894,9 @@ fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(predation_and_culture, m)?)?;
     m.add_function(wrap_pyfunction!(step_movement, m)?)?;
     m.add_function(wrap_pyfunction!(reproduce_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(signal_emit, m)?)?;
+    m.add_function(wrap_pyfunction!(pleasure_update, m)?)?;
     m.add_function(wrap_pyfunction!(native_gene_indicators, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_gene_wiring, m)?)?;
     Ok(())
 }
