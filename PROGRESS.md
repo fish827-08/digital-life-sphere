@@ -41,9 +41,10 @@
 | 2026-09-07 | 预计算邻居表优化（world/sphere_world.py） | 构造时一次性算好全网格邻居表 `_nb_table`(7200,8) + `_pole_nb`(2,120)，`neighbors()` 改查表返回；引擎移动/觅食两处调用点零改动，行为零变化（新 tests/test_sphere_world.py 全网格 vs 旧算法逐位对拍）；基准 3.030/3.049s → 0.615/0.569s ≈ 5x，全量 pytest 34 例通过 |
 | 2026-09-07 | 模块四：observatory 适配 + 快照桥（✅） | traits（14 基因位+3 派生，统计口径与引擎同公式）/ statistics（数组化聚合，直接读引擎 SoA 数组）/ observer（世代+节拍双触发器）/ experiment（嵌套 SimConfig + overrides 合并 + SphereEngine runner，run_single 每 tick 对齐终止条件置位）/ __main__ CLI（--rows/--cols/--sim-core）/ persistence/io（manifest+generations 落盘）；快照桥 broker：每 100 tick 采 JSON 快照（含个体明细广播），WebSocket 推流，环形只有标量防 OOM，新客户端连上补发最新快照；pytest 全量 50 例通过（新增 16 例）|
 | 2026-09-07 | 提交并推送模块三、四到 GitHub（origin/main） | 提交：3ed6fd0（模块三）/ 8aefe06（模块四）；`git push origin main` 后本地与远端同步 | GitHub 远端 `fish827-08/digital-life-sphere`（SSH）为唯一备份，推送后 3 个提交（模块二收尾~模块四）全部上云 |
+| 2026-09-07 | **L1 斑块资源（守恒版）** — feature/l1-patchy 分支 | ResourceConfig 加 7 个斑块参数（distribution/patch_count/patch_radius/patch_capacity_mult/patch_regrowth_mult/background_fill/initial_fill）+ 断言；ResourceField 加守恒分布（容量守恒+再生守恒）与守恒倍率 regrow；引擎接入（patch_seed=config.seed 独立 rng，patchy 时 Rust regrow 回退 Python）；顺手修复引擎 `__init__` 调用不存在的 `set_initial_fill` 的潜在 bug；新 tests/test_patchy_resource.py 18 例全过（容量守恒/再生守恒公式精确/默认 uniform 零回归/空间非均匀/可复现/引擎集成/边界报错）；全量 Python 路径 39 例通过；experiments/patchy_vs_uniform.py 对比实验（2000tick×3seed×2组）：总食物守恒（差异<1%）、种群 0/3 灭绝、空间聚集未显现（无感知基因，预期内）、性能 1.5s/run | 语言涌现五要素第一步：资源空间异质化。守恒设计保证不破坏平衡（总食物量/再生量不变）。默认参数保守（30斑块/半径2/倍率3）避免背景容量为负。生态效应（空间聚集/基因分化）需等 L3 感知基因上线才能观测 |
 
 ## 进行中
-- 模块四已完成并通过审阅、已提交推送（8aefe06）；下一步进入模块五（前端渲染层：消费快照桥 WebSocket 流）
+- 模块四已完成并通过审阅、已提交推送（8aefe06）；L1 斑块资源（守恒版）已完成（feature/l1-patchy 分支，18 例测试通过+对比实验完成）；语言涌现扩展按开发手册 L1~L6 六级难度推进，下一步 L2（数组级扩展：愉悦度/田字格信号场）或 L3（感知基因 g14）
 
 ## 待办事项
 1. 模块一 SphereWorld 开发（✅ 已完成）
@@ -52,6 +53,12 @@
 4. 模块三 Rust 热核 Sim-core（✅ 3.1~3.5 + 邻居表优化，已提交 3ed6fd0）
 5. 模块四 observatory 适配 + 快照桥（✅ 已提交 8aefe06 并推送远端）
 6. 模块五 前端渲染层（未开始）
+7. **语言涌现扩展 L1 斑块资源（守恒版）**（✅ 已完成，feature/l1-patchy 分支）
+8. 语言涌现扩展 L2 数组级扩展（愉悦度四数组/田字格信号场，未开始）
+9. 语言涌现扩展 L3 基因解码扩展（g14 感知/g15 信号/g16 攻击等，未开始）
+10. 语言涌现扩展 L4 行为决策逻辑（信号发射/捕食/植物化，未开始）
+11. 语言涌现扩展 L5 学习与继承机制（工作记忆/文化传递/信誉表，未开始）
+12. 语言涌现扩展 L6 Rust 下沉（热点循环 PyO3，未开始）
 
 ## 问题与决策记录
 | 日期 | 问题 | 决策 | 原因 |
@@ -82,3 +89,8 @@
 | 2026-09-07 | 模块四 run_single 终止条件 | 手动逐 tick 循环里，每 tick 后执行 `engine._finished = engine._end_condition_met()`（与 `engine.run()` 语义对齐） | 适配时发现手动循环不置 `_finished` 会导致灭绝/跑满不停（浪费 CPU 且 ended_reason 误报 max_ticks）；对齐后灭绝走 stop_on_extinction 提前停 |
 | 2026-09-07 | 球面版 resource_distribution 组实验裁剪 | 只保留 dist_uniform_sparse / dist_uniform_rich 两个均匀对照，删除旧版 patchy（斑块）实验 | 球面资源场（模块一）只支持均匀填充，斑块机制未实现；不预设机制，诚实标注（等资源场支持后补回） |
 | 2026-09-07 | 快照桥消息设计 | tick/总能量/总资源/平均能量等标量 +（广播版）个体明细 {id, flat, energy, generation, age}；环形缓冲只存标量版 | 前端渲染直接消费明细；5000 个体 × 4096 份缓冲会 OOM，明细只在广播时带；新客户端连上先补发最新标量快照（落点晚也能看到画面） |
+| 2026-09-07 | **L1 斑块资源守恒设计** | 两条守恒：①容量守恒（Σ_capacity 与 uniform 相等，bg_cap_mult=(total-patch_area×mult)/bg_area，必须>0）②再生守恒（面积加权 patch_mult×patch_frac+bg_mult×bg_frac=1）；初始食物总量**不守恒**（patch 格填满 capacity×1.0、背景格 capacity×background_fill，这是 patchy 的核心特征——斑块富集/背景贫瘠） | 容量/再生守恒保证种群承载上限和时间供给不变→不破坏平衡；初始食物不守恒是设计选择（两种世界的初始条件本就不同），在实验中如实标注。如需严格对比可调整 background_fill 使总量相等 |
+| 2026-09-07 | **L1 patch 中心随机数隔离** | patch 中心选择用独立 rng（np.random.default_rng(patch_seed)），patch_seed=config.seed；不消费引擎 self.rng | 保证同 seed 下 uniform 与 patchy 引擎的个体初始基因/位置分布完全一致（RNG 消费顺序不变）→ 可复现、可对拍；测试 test_engine_patchy_does_not_consume_engine_rng 验证 |
+| 2026-09-07 | **L1 patchy 模式 Rust regrow 回退** | patchy 时 `_advance_one_tick` 自动用 Python `ResourceField.regrow`（含空间倍率），uniform 保持双路径对拍 | Rust 侧 `sim_core.regrow` 暂未支持 patch_mask/空间倍率；patchy 模式回退 Python 保证行为正确，不影响默认 uniform 的 Rust 加速。后续 L6 可在 Rust 侧加 patch 支持 |
+| 2026-09-07 | **L1 默认参数保守化** | patch_count=30, patch_radius=2, patch_capacity_mult=3.0, patch_regrowth_mult=2.0, background_fill=0.1 | 初版默认 60斑块/半径3/倍率6 导致背景容量为负（覆盖面积过大）；保守参数保证 bg_cap_mult>0、可直接跑通；用户可在 config 中调大 |
+| 2026-09-07 | **L1 实验结果解读** | 2000tick 内空间聚集度 patchy(4.67) 低于 uniform(5.37)、基因多样性几乎相同——**不是失败，是预期** | L1 只加了资源斑块，没有感知基因（g14），生物无法感知斑块差异→不会主动聚集；空间 CV 高来自随机分布波动而非主动聚集。生态效应需等 L3 感知基因 + 更长时间（10000+tick）才能观测。L1 的价值是基础设施就绪+守恒验证通过 |

@@ -57,8 +57,12 @@ class ResourceField:
         "capacity_per_area",
         "regrowth_rate",
         "temp_sensitivity",
+        "distribution",
         "_grid",
         "_capacity",
+        "_patch_mask",
+        "_patch_regrowth_mult",
+        "_bg_regrowth_mult",
     )
 
     def __init__(
@@ -68,39 +72,97 @@ class ResourceField:
         capacity_per_area: float = 40.0,
         regrowth_rate: float = 0.5,
         temp_sensitivity: float = 1.0,
+        distribution: str = "uniform",
+        patch_count: int = 30,
+        patch_radius: int = 2,
+        patch_capacity_mult: float = 3.0,
+        patch_regrowth_mult: float = 2.0,
+        background_fill: float = 0.1,
+        initial_fill: float = 0.5,
+        patch_seed: int = 42,
     ) -> None:
-        """铺好初始食物（整个球面均匀随机填充到容量的一部分）。
+        """铺好初始食物。
+
+        uniform（默认）：每格均匀填充到容量的 initial_fill 倍，行为与旧版完全一致。
+        patchy：食物聚簇到斑块，背景压低；两条守恒保证总食物量不变：
+          ① 容量守恒：Σ_capacity 与 uniform 版相等（种群承载上限不变）
+          ② 再生守恒：周期平均总再生量与 uniform 版相等（时间上供给不变）
+        patch 中心由独立 rng（patch_seed）选择，不消费调用方的 rng，
+        保证不影响引擎的 RNG 消费顺序（同 seed 同结果）。
 
         参数
         ----
-        world : SphereWorld
-            网格局（文件 1 的对象），决定格子数量与面积。
-        lt : LightAndTemperature
-            光照温度场（文件 2 的对象），再生时要查温度。
-        capacity_per_area : float, 默认 40.0
-            单位面积能存多少食物（可理解为"一单位面积土地的食物上限"）。
-        regrowth_rate : float, 默认 0.5
-            基准再生：温度合适时每 tick 向每格补充的食物量。
-        temp_sensitivity : float, 默认 1.0
-            再生对温度的依赖程度。设为 0 则再生与温度无关（纯空间）。
-            越大则"冷的地方食物长得越慢"越明显。
-
-        返回
-        ----
-        None。构造完成后即可查询/消费。
+        world, lt, capacity_per_area, regrowth_rate, temp_sensitivity :
+            同旧版。
+        distribution : "uniform" | "patchy"，默认 uniform。
+        patch_count : 斑块中心数。
+        patch_radius : 斑块半径（邻居扩散层数）。
+        patch_capacity_mult : 斑块格容量倍率（必须 > 1）。
+        patch_regrowth_mult : 斑块格再生倍率。
+        background_fill : 背景格初始食物占比（0~1，建议压低）。
+        initial_fill : uniform 模式的初始填充比例（0~1）。
+        patch_seed : patchy 模式选中心的独立随机种子。
         """
         self.world = world
         self.lt = lt
         self.capacity_per_area = float(capacity_per_area)
         self.regrowth_rate = float(regrowth_rate)
         self.temp_sensitivity = float(temp_sensitivity)
+        self.distribution = distribution
 
-        # 每格容量 = 面积权重 × 单位面积容量（极点小、赤道大）
         areas = world.cell_area(np.arange(world.n_cells))
-        self._capacity = areas * capacity_per_area
-        # 初始填一半（均匀随机，同一种子可复现）
-        # 注：这里不用 rng 参数，初始分布由调用方决定，便于确定性测试
-        self._grid = self._capacity * 0.5
+        base_cap = areas * capacity_per_area
+
+        if distribution == "patchy":
+            # 1) 选斑块中心（独立 rng，不碰调用方 rng → 不影响引擎 RNG 消费顺序）
+            rng = np.random.default_rng(patch_seed)
+            centers = rng.choice(
+                world.n_cells,
+                size=min(patch_count, world.n_cells),
+                replace=False,
+            )
+            # 2) 邻居扩散 radius 层 → patch_mask（构造时一次性，可接受）
+            patch_mask = np.zeros(world.n_cells, dtype=bool)
+            patch_mask[centers] = True
+            for _ in range(patch_radius):
+                cells = np.flatnonzero(patch_mask)
+                all_nb = np.concatenate([world.neighbors(int(c)) for c in cells])
+                patch_mask[all_nb] = True
+            self._patch_mask = patch_mask
+            # 3) 容量守恒：patch 格 × mult，背景格 × bg_mult，Σ 与 uniform 版相等
+            patch_area = float(areas[patch_mask].sum())
+            bg_area = float(areas[~patch_mask].sum())
+            total_area = float(areas.sum())
+            bg_cap_mult = (total_area - patch_area * patch_capacity_mult) / bg_area
+            if bg_cap_mult <= 0:
+                raise ValueError(
+                    f"斑块容量倍率过大：patch_capacity_mult={patch_capacity_mult}, "
+                    f"patch_count={patch_count} 导致背景容量为负。请调小倍率或斑块数。"
+                )
+            self._capacity = np.where(
+                patch_mask,
+                base_cap * patch_capacity_mult,
+                base_cap * bg_cap_mult,
+            )
+            # 4) 再生守恒：patch_mult × patch_frac + bg_mult × bg_frac = 1
+            patch_frac = patch_area / total_area
+            bg_frac = bg_area / total_area
+            self._patch_regrowth_mult = float(patch_regrowth_mult)
+            self._bg_regrowth_mult = float(
+                (1.0 - patch_regrowth_mult * patch_frac) / bg_frac
+            )
+            # 5) 初始填充：patch 格填满，背景格填 background_fill
+            self._grid = np.where(
+                patch_mask,
+                self._capacity * 1.0,
+                self._capacity * background_fill,
+            )
+        else:
+            self._capacity = base_cap
+            self._grid = self._capacity * initial_fill
+            self._patch_mask = None
+            self._patch_regrowth_mult = 1.0
+            self._bg_regrowth_mult = 1.0
 
     # ---- 查询（只看不吃） ---------------------------------------------------
 
@@ -257,7 +319,15 @@ class ResourceField:
         #   ≥0° → 1（满速）；-20° → 0（停摆）；中间线性过渡
         factor = np.clip((temps + 20.0) / 20.0, 0.0, 1.0)
         factor = np.power(factor, self.temp_sensitivity)
-        return self.regrowth_rate * factor
+        growth = self.regrowth_rate * factor
+        # patchy 守恒：斑块格 × patch_mult，背景格 × bg_mult，周期总再生量不变
+        if self.distribution == "patchy" and self._patch_mask is not None:
+            growth = np.where(
+                self._patch_mask,
+                growth * self._patch_regrowth_mult,
+                growth * self._bg_regrowth_mult,
+            )
+        return growth
 
     # ---- 快照 / 调试 ---------------------------------------------------------
 

@@ -151,10 +151,16 @@ class SphereEngine:
             capacity_per_area=config.resources.capacity_per_area,
             regrowth_rate=config.resources.regrowth_rate,
             temp_sensitivity=config.resources.temp_sensitivity,
+            distribution=config.resources.distribution,
+            patch_count=config.resources.patch_count,
+            patch_radius=config.resources.patch_radius,
+            patch_capacity_mult=config.resources.patch_capacity_mult,
+            patch_regrowth_mult=config.resources.patch_regrowth_mult,
+            background_fill=config.resources.background_fill,
+            initial_fill=config.resources.initial_fill,
+            # 用 config.seed 派生 patch 中心：可复现，且独立 rng 不消费引擎 self.rng
+            patch_seed=config.seed,
         )
-        # 初始填充覆盖：配置允许指定
-        if config.resources.initial_fill != 0.5:
-            self.resources.set_initial_fill(config.resources.initial_fill)
 
         n = config.population.initial_count
         self._flat = np.zeros(n, dtype=np.int64)
@@ -250,7 +256,12 @@ class SphereEngine:
 
     def _advance_one_tick(self) -> TickStats:
         # 顺序契约：先资源再生，再种群行动
-        if self._use_sim_core:
+        # patchy 模式的再生含空间倍率（斑块快/背景慢，守恒），Rust 侧 regrow 暂未支持
+        # → patchy 时自动回退 Python 路径；uniform 保持双路径对拍
+        use_rust_regrow = (
+            self._use_sim_core and self.resources.distribution == "uniform"
+        )
+        if use_rust_regrow:
             # 3.4：资源再生长沉到 Rust（与 ResourceField.regrow 逐位等价，
             # 默认 temp_sensitivity=1.0 时严格一致；≠1 有 ≤1-ULP 差异）
             self._sim_core.regrow(

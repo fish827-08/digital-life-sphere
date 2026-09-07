@@ -54,10 +54,29 @@ class ResourceConfig:
     temp_sensitivity: float = 1.0     # 再生对温度的依赖（0=不 care，越大越敏感）
     initial_fill: float = 0.5         # 初始填充比例（每格开始有多少食物，0~1）
 
+    # ---- 斑块化（L1，守恒版）------------------------------------------
+    # distribution="uniform" 时以下字段全部不生效，行为与旧版完全一致。
+    # "patchy" 时：食物聚簇到斑块，背景压低；两条守恒保证总食物量不变：
+    #   ① 容量守恒：Σ_capacity 与 uniform 版相等（种群承载上限不变）
+    #   ② 再生守恒：周期平均总再生量与 uniform 版相等（时间上供给不变）
+    distribution: str = "uniform"          # "uniform" | "patchy"
+    patch_count: int = 30                  # 斑块中心数（默认保守，避免覆盖过大）
+    patch_radius: int = 2                  # 斑块半径（格，邻居扩散层数）
+    patch_capacity_mult: float = 3.0       # 斑块格容量倍率（>1；建议 1.5~4，过大会背景容量为负）
+    patch_regrowth_mult: float = 2.0       # 斑块格再生倍率
+    background_fill: float = 0.1            # 背景格初始食物占比（压低，否则协作无收益）
+
     def __post_init__(self) -> None:
         assert self.capacity_per_area > 0, "容量为正"
         assert self.regrowth_rate >= 0, "再生率非负"
         assert 0.0 <= self.initial_fill <= 1.0, "初始填充比例在 0~1"
+        assert self.distribution in ("uniform", "patchy"), "distribution 只能是 uniform 或 patchy"
+        if self.distribution == "patchy":
+            assert self.patch_count >= 1, "斑块数至少 1"
+            assert self.patch_radius >= 1, "斑块半径至少 1"
+            assert self.patch_capacity_mult > 1.0, "斑块容量倍率必须 > 1（否则无富集）"
+            assert self.patch_regrowth_mult > 0, "斑块再生倍率为正"
+            assert 0.0 <= self.background_fill <= 1.0, "背景填充比例在 0~1"
 
 
 @dataclass
