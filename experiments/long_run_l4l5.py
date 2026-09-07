@@ -32,6 +32,7 @@ def main():
     cfg.world.cols = 120
     cfg.population.initial_count = 500
     cfg.resources.patchy = True
+    cfg.simulation.use_sim_core = True  # L6 Rust 下沉，N=5000 时 ~117 tick/s
     e = SphereEngine(cfg)
 
     print(f"=== L4+L5 长实验 ===")
