@@ -21,6 +21,7 @@ mod l4_l5;
 mod movement;
 mod predation;
 mod regrow;
+mod reproduction;
 mod step_vectors;
 
 /// 基因位索引常量（与 Python simulation.genes 注册表对应），供绑定层对外导出
@@ -547,6 +548,178 @@ fn step_movement(
     Ok(())
 }
 
+/// reproduce_batch：繁殖（L7b / T4）数值核心下沉。
+///
+/// 语义与引擎步骤 8 逐位等价；RNG 由 Python 按原顺序预生成传入，
+/// 本函数只做确定性算术。父本 energy/stomach/cooldown 就地更新，
+/// 子代各行写入预分配的 child_* 数组（Python 随后 np.concatenate）。
+/// 形状约定：ri(K)、mut_mask/gene_noise(K×gc)、exp_noise(K×exp)等。
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+fn reproduce_batch(
+    ri: PyReadonlyArray1<'_, i64>,
+    genes: PyReadonlyArray2<'_, f64>,
+    energy: Bound<'_, PyArray1<f64>>,
+    stomach: Bound<'_, PyArray1<f64>>,
+    cooldown: Bound<'_, PyArray1<f64>>,
+    exp: PyReadonlyArray2<'_, f64>,
+    interpret: PyReadonlyArray2<'_, f64>,
+    trust: PyReadonlyArray1<'_, f64>,
+    baseline: PyReadonlyArray1<'_, f64>,
+    mut_mask: PyReadonlyArray2<'_, u8>,
+    gene_noise: PyReadonlyArray2<'_, f64>,
+    exp_noise: PyReadonlyArray2<'_, f64>,
+    interp_noise: PyReadonlyArray2<'_, f64>,
+    child_genes: Bound<'_, PyArray2<f64>>,
+    child_energy: Bound<'_, PyArray1<f64>>,
+    child_stomach: Bound<'_, PyArray1<f64>>,
+    child_exp: Bound<'_, PyArray2<f64>>,
+    child_interp: Bound<'_, PyArray2<f64>>,
+    child_trust: Bound<'_, PyArray1<f64>>,
+    child_baseline: Bound<'_, PyArray1<f64>>,
+    gene_min: f64,
+    gene_max: f64,
+    max_reward: f64,
+    repro_cd_scale: f64,
+) -> PyResult<()> {
+    let ri_s = ri.as_slice()?;
+    let k = ri_s.len();
+    let n = unsafe { energy.as_array().len() };
+    require_len("stomach", unsafe { stomach.as_array().len() }, n)?;
+    require_len("cooldown", unsafe { cooldown.as_array().len() }, n)?;
+    require_len("trust", trust.as_array().len(), n)?;
+    require_len("baseline", baseline.as_array().len(), n)?;
+    require_len("child_energy", unsafe { child_energy.as_array().len() }, k)?;
+    require_len("child_stomach", unsafe { child_stomach.as_array().len() }, k)?;
+    require_len("child_trust", unsafe { child_trust.as_array().len() }, k)?;
+    require_len("child_baseline", unsafe { child_baseline.as_array().len() }, k)?;
+
+    let g = genes.as_array();
+    let gsh = g.shape();
+    let (n_rows, gene_count) = (gsh[0], gsh[1]);
+    if n_rows != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "genes: 行数 {n_rows} 与个体数 {n} 不符"
+        )));
+    }
+    let g_slice = g.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("genes: 需要 C 连续（行主序）数组")
+    })?;
+
+    let e_arr = exp.as_array();
+    let esh = e_arr.shape();
+    if esh[0] != n || esh[1] != 120 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "exp: 形状 ({}, {}) 应为 ({n}, 120)", esh[0], esh[1]
+        )));
+    }
+    let e_slice = e_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("exp: 需要 C 连续（行主序）数组")
+    })?;
+
+    let i_arr = interpret.as_array();
+    let ish = i_arr.shape();
+    if ish[0] != n || ish[1] != 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "interpret: 形状 ({}, {}) 应为 ({n}, 16)", ish[0], ish[1]
+        )));
+    }
+    let i_slice = i_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("interpret: 需要 C 连续（行主序）数组")
+    })?;
+
+    // K 行预算组：mut_mask/gene_noise (K×gc)、exp_noise (K×120)、interp_noise (K×16)，
+    // 子代输出 (K×gc / K×120 / K×16)。
+    let m_arr = mut_mask.as_array();
+    let msh = m_arr.shape();
+    let full_shape_check = |want: (usize, usize), got: (usize, usize)| -> bool {
+        got == want
+    };
+    if !full_shape_check((k, gene_count), (msh[0], msh[1])) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "mut_mask: 形状 ({}, {}) 应为 ({k}, {gene_count})", msh[0], msh[1]
+        )));
+    }
+    let m_slice = m_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("mut_mask: 需要 C 连续（行主序）数组")
+    })?;
+
+    let gn_arr = gene_noise.as_array();
+    let gnsh = gn_arr.shape();
+    if (gnsh[0], gnsh[1]) != (k, gene_count) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "gene_noise: 形状 ({}, {}) 应为 ({k}, {gene_count})", gnsh[0], gnsh[1]
+        )));
+    }
+    let gn_slice = gn_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("gene_noise: 需要 C 连续（行主序）数组")
+    })?;
+
+    let en_arr = exp_noise.as_array();
+    let ensh = en_arr.shape();
+    if (ensh[0], ensh[1]) != (k, 120) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "exp_noise: 形状 ({}, {}) 应为 ({k}, 120)", ensh[0], ensh[1]
+        )));
+    }
+    let en_slice = en_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("exp_noise: 需要 C 连续（行主序）数组")
+    })?;
+
+    let in_arr = interp_noise.as_array();
+    let insh = in_arr.shape();
+    if (insh[0], insh[1]) != (k, 16) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "interp_noise: 形状 ({}, {}) 应为 ({k}, 16)", insh[0], insh[1]
+        )));
+    }
+    let in_slice = in_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("interp_noise: 需要 C 连续（行主序）数组")
+    })?;
+
+    let cg_arr = unsafe { child_genes.as_array() };
+    if cg_arr.shape() != [k, gene_count] {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "child_genes: 形状 ({}, {}) 应为 ({k}, {gene_count})",
+            cg_arr.shape()[0], cg_arr.shape()[1]
+        )));
+    }
+    let mut cg = unsafe { child_genes.as_slice_mut()? };
+    let ce_arr = unsafe { child_exp.as_array() };
+    if ce_arr.shape() != [k, 120] {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "child_exp: 形状 ({}, {}) 应为 ({k}, 120)",
+            ce_arr.shape()[0], ce_arr.shape()[1]
+        )));
+    }
+    let mut ce = unsafe { child_exp.as_slice_mut()? };
+    let ci_arr = unsafe { child_interp.as_array() };
+    if ci_arr.shape() != [k, 16] {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "child_interp: 形状 ({}, {}) 应为 ({k}, 16)",
+            ci_arr.shape()[0], ci_arr.shape()[1]
+        )));
+    }
+    let mut ci = unsafe { child_interp.as_slice_mut()? };
+
+    let mut e = unsafe { energy.as_slice_mut()? };
+    let mut s = unsafe { stomach.as_slice_mut()? };
+    let mut c = unsafe { cooldown.as_slice_mut()? };
+
+    reproduction::reproduce_batch(
+        ri_s, g_slice, &mut e, &mut s, &mut c,
+        e_slice, i_slice, trust.as_slice()?, baseline.as_slice()?,
+        m_slice, gn_slice, en_slice, in_slice,
+        &mut cg, unsafe { child_energy.as_slice_mut()? },
+        unsafe { child_stomach.as_slice_mut()? },
+        &mut ce, &mut ci,
+        unsafe { child_trust.as_slice_mut()? },
+        unsafe { child_baseline.as_slice_mut()? },
+        gene_count, 120, gene_min, gene_max, max_reward, repro_cd_scale,
+    );
+    Ok(())
+}
+
 #[pymodule]
 fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(regrow_rs, m)?)?;
@@ -558,6 +731,7 @@ fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(predation_attack, m)?)?;
     m.add_function(wrap_pyfunction!(predation_and_culture, m)?)?;
     m.add_function(wrap_pyfunction!(step_movement, m)?)?;
+    m.add_function(wrap_pyfunction!(reproduce_batch, m)?)?;
     m.add_function(wrap_pyfunction!(native_gene_indicators, m)?)?;
     Ok(())
 }
