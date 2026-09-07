@@ -8,6 +8,9 @@
 use crate::genes::G_AGGRESSION;
 
 /// 捕食核心（接收预构建 CSR）。
+///
+/// 参数化（A2 收编）：attack_cost/成功率乘数/上下限/能量与胃粮转移比例
+/// 均由配置传入；默认值 = 旧硬编码（0.1/0.5/0.1/0.9/0.4/0.4），双路径逐位等价。
 #[allow(clippy::too_many_arguments)]
 pub fn predation_attack_with_csr(
     energy: &mut [f64],
@@ -24,6 +27,12 @@ pub fn predation_attack_with_csr(
     gene_count: usize,
     max_energy: f64,
     eat_efficiency: f64,
+    attack_cost: f64,
+    success_gene_gain: f64,
+    success_floor: f64,
+    success_ceil: f64,
+    transfer_ratio: f64,
+    stomach_transfer: f64,
     cell_indptr: &[usize],
     cell_indices: &[usize],
 ) {
@@ -38,7 +47,7 @@ pub fn predation_attack_with_csr(
         if idx >= n {
             continue;
         }
-        if energy[idx] <= 0.1 {
+        if energy[idx] <= attack_cost {
             continue;
         }
         let c = flat[idx] as usize;
@@ -80,17 +89,18 @@ pub fn predation_attack_with_csr(
             continue;
         }
 
-        energy[idx] -= 0.1;
+        energy[idx] -= attack_cost;
 
         let total = energy[idx] + energy[prey];
         let energy_ratio = energy[idx] / total.max(1e-9);
         let g16 = genes[idx * gene_count + G_AGGRESSION];
-        let success_rate = (energy_ratio * (0.5 + g16 * 0.5)).clamp(0.1, 0.9);
+        let success_rate =
+            (energy_ratio * (0.5 + g16 * success_gene_gain)).clamp(success_floor, success_ceil);
 
         if rand_success[k] < success_rate {
             predation_mask[prey] = true;
-            energy[idx] += energy[prey] * 0.4;
-            stomach[idx] = (stomach[idx] + stomach[prey] * 0.4).min(stomach_cap);
+            energy[idx] += energy[prey] * transfer_ratio;
+            stomach[idx] = (stomach[idx] + stomach[prey] * stomach_transfer).min(stomach_cap);
             stomach[prey] = 0.0;
         }
     }
@@ -146,6 +156,7 @@ pub fn predation_attack(
         attackers, rand_prey, rand_success,
         neighbors, n_cells, nb_stride, gene_count,
         max_energy, eat_efficiency,
+        0.1, 0.5, 0.1, 0.9, 0.4, 0.4,  // A2 收编前的旧默认值（独立对拍接口不动）
         &cell_indptr, &cell_indices,
     );
 }

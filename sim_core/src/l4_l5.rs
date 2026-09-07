@@ -32,6 +32,12 @@ pub fn predation_and_culture(
     max_energy: f64,
     eat_efficiency: f64,
     culture_alpha: f64,
+    attack_cost: f64,
+    success_gene_gain: f64,
+    success_floor: f64,
+    success_ceil: f64,
+    transfer_ratio: f64,
+    stomach_transfer: f64,
 ) {
     let n = flat.len();
     if n == 0 {
@@ -67,6 +73,8 @@ pub fn predation_and_culture(
             flat, genes, attackers, rand_prey, rand_success,
             neighbors, n_cells, nb_stride, gene_count,
             max_energy, eat_efficiency,
+            attack_cost, success_gene_gain, success_floor, success_ceil,
+            transfer_ratio, stomach_transfer,
             &cell_indptr, &cell_indices,
         );
     }

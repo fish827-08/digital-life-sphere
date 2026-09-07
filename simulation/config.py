@@ -95,6 +95,11 @@ class OrganismConfig:
     senile_fraction: float = 0.75     # 老年年龄 = 寿命的几成 → 进入衰老期，维持费上升
     growth_mult: float = 1.6          # 未成年（幼体）每 tick 维持费倍率（在长身体，吃得多耗得多）
     senile_mult: float = 1.4          # 老年每 tick 维持费倍率（器官退化，维持费上升）
+    # 活性温度门（隐式选择压，审计标注 [隐含] → A2 收编）：
+    # 冷血个体有效活动 = 环境活动 × (niche_floor + niche_gain × 温度适配度)。
+    # 0.4 保底=即使完全不适配温度仍有 40% 活动 → 弱化 g11 温度偏好的选择梯度。
+    niche_floor: float = 0.4
+    niche_gain: float = 0.6
 
     def __post_init__(self) -> None:
         assert self.initial_energy < self.max_energy, "初始能量要小于上限"
@@ -169,11 +174,58 @@ class PleasureConfig:
     w_info: float = 0.3                 # 事件收益：信息增益权重
     w_social: float = 0.2               # 事件收益：社会增益权重
     inheritance_noise: float = 0.02     # 繁殖时 expectation 继承噪声（文化传递载体）
+    # 社会事件基础效价（审计标注 [隐含] → A2 收编）：
+    # 有同伴 ≥1 → +social_rpe / 孤独 → alone_rpe（注意非对称：0.2 vs -0.1）。
+    social_rpe: float = 0.2
+    alone_rpe: float = -0.1
 
     def __post_init__(self) -> None:
         assert 0 < self.alpha <= 1, "alpha 应在 (0,1]"
         assert 0 < self.valence_decay <= 1, "valence_decay 应在 (0,1]"
         assert self.expectation_size == 120, "当前情境编码固定为 5×4×3×2=120"
+
+
+@dataclass
+class PredationConfig:
+    """捕食参数（L4，影响 g16 攻击性的 fitness）。
+
+    审计标注：能量转移率 0.4 是[隐含]最强"战斗红利"、成功率乘 g16 是[刻意]强选择、
+    攻击概率系数/门槛为[隐含]（→ A2 收编，默认值保持旧行为逐位一致）。
+    """
+
+    attack_cost: float = 0.1           # 每次攻击的能耗（无论成败）
+    attack_prob_coef: float = 0.2      # 攻击概率 ≈ g16 × 系数 × 饥饿度
+    attack_gene_gate: float = 0.3      # g16 低于该值不发动攻击
+    success_gene_gain: float = 0.5     # 成功率 = 能量比 × (0.5 + g16×gain)，clamp
+    success_floor: float = 0.1         # 成功率下限
+    success_ceil: float = 0.9          # 成功率上限
+    transfer_ratio: float = 0.4        # 捕食成功：猎物能量转移比例
+    stomach_transfer: float = 0.4      # 猎物胃粮转移比例
+
+    def __post_init__(self) -> None:
+        assert self.attack_cost > 0
+        assert 0 <= self.success_floor < self.success_ceil <= 1.0
+        assert 0.0 <= self.transfer_ratio <= 1.0
+        assert 0.0 <= self.stomach_transfer <= 1.0
+        assert 0.0 <= self.attack_gene_gate <= 1.0
+
+
+@dataclass
+class CultureConfig:
+    """文化学习参数（L5，信任系统）。
+
+    审计标注：信任更新非对称（+trust_true / −trust_false）是[隐含]反合作偏置，
+    → A2 收编。默认值保持旧行为（真 +0.05 / 假 −0.1）。
+    """
+
+    food_threshold: float = 0.3        # "邻格有粮"判定阈值（信号验证用）
+    trust_true: float = 0.05           # 信号验证为真 → 信任上升幅度
+    trust_false: float = 0.1           # 信号验证为假 → 信任下降幅度（注意取负前传）
+
+    def __post_init__(self) -> None:
+        assert 0.0 <= self.food_threshold <= 1.0
+        assert self.trust_true >= 0
+        assert self.trust_false >= 0
 
 
 @dataclass
@@ -189,6 +241,8 @@ class SimConfig:
     population: PopulationConfig = field(default_factory=PopulationConfig)
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
     pleasure: PleasureConfig = field(default_factory=PleasureConfig)
+    predation: PredationConfig = field(default_factory=PredationConfig)
+    culture: CultureConfig = field(default_factory=CultureConfig)
 
     # ---- 可复现性辅助：配置 ⇄ dict ------------------------------
 
@@ -198,7 +252,10 @@ class SimConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "SimConfig":
-        """从 dict 重建配置（保证存档可得回同样的配置）。"""
+        """从 dict 重建配置（保证存档可得回同样的配置）。
+
+        旧存档缺失 predation/culture 键时回退默认值（保持向前兼容）。
+        """
         return cls(
             seed=data["seed"],
             world=WorldConfig(**data["world"]),
@@ -213,6 +270,17 @@ class SimConfig:
                 PleasureConfig(**data["pleasure"])
                 if "pleasure" in data
                 else PleasureConfig()
+            ),
+            # A2 新增捕食/文化配置（隐式选择压收编）；旧存档回退默认值。
+            predation=(
+                PredationConfig(**data["predation"])
+                if "predation" in data
+                else PredationConfig()
+            ),
+            culture=(
+                CultureConfig(**data["culture"])
+                if "culture" in data
+                else CultureConfig()
             ),
         )
 

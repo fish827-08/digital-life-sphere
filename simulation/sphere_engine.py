@@ -398,6 +398,7 @@ class SphereEngine:
     def _step_population(self) -> tuple[int, int, Counter]:
         """整群推进一步。返回 (born, died, deaths)。"""
         ocfg, gcfg = self.config.organisms, self.config.genome
+        ccfg = self.config.culture          # 隐式选择压参数化（A2）：信任学习幅值
         P = len(self._id)
         if P == 0:
             self._extinct = True
@@ -609,14 +610,14 @@ class SphereEngine:
                 # 5.6) 信任学习：移动到有信号的格子后验证真假
                 target_cells = self._flat[mi]
                 had_signal = sig_present[target_cells] > 0
-                has_food = food_ratio[target_cells] > 0.3
+                has_food = food_ratio[target_cells] > ccfg.food_threshold
                 true_sig = had_signal & has_food
                 false_sig = had_signal & ~has_food
                 self._trust[mi[true_sig]] = np.minimum(
-                    1.0, self._trust[mi[true_sig]] + 0.05
+                    1.0, self._trust[mi[true_sig]] + ccfg.trust_true
                 )
                 self._trust[mi[false_sig]] = np.maximum(
-                    0.0, self._trust[mi[false_sig]] - 0.1
+                    0.0, self._trust[mi[false_sig]] - ccfg.trust_false
                 )
         else:
             moved = self.rng.random(P) < move_prob
@@ -665,24 +666,25 @@ class SphereEngine:
                 # 5.6) 信任学习
                 target_cells = self._flat[mi]
                 had_signal = sig_present[target_cells] > 0
-                has_food = food_ratio[target_cells] > 0.3
+                has_food = food_ratio[target_cells] > ccfg.food_threshold
                 true_sig = had_signal & has_food
                 false_sig = had_signal & ~has_food
                 self._trust[mi[true_sig]] = np.minimum(
-                    1.0, self._trust[mi[true_sig]] + 0.05
+                    1.0, self._trust[mi[true_sig]] + ccfg.trust_true
                 )
                 self._trust[mi[false_sig]] = np.maximum(
-                    0.0, self._trust[mi[false_sig]] - 0.1
+                    0.0, self._trust[mi[false_sig]] - ccfg.trust_false
                 )
 
         # 5.5) 捕食（g16）+ 6.5) 文化学习（L5）：use_sim_core=True 时合并为一次 Rust 调用，
         #     共用一次 cell→个体 CSR 构建，消除重复开销。use_sim_core=False 时分步执行。
         predation_mask = np.zeros(P, dtype=bool)
+        pcfg = self.config.predation           # 隐式选择压参数化（A2）：捕食段参数
         attack_gene = genes[:, Gene.AGGRESSION]
         hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
-        attack_prob = attack_gene * 0.2 * hunger
+        attack_prob = attack_gene * pcfg.attack_prob_coef * hunger
         attackers = np.flatnonzero(
-            (attack_gene > 0.3) & (self.rng.random(P) < attack_prob)
+            (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
         )
         # 文化学习需要的成熟年龄（年龄已在 stage2 推进，use_sim_core=True 时）
         age_f = self._age[:P].astype(np.float64)
@@ -704,6 +706,9 @@ class SphereEngine:
                 self._nb_table.reshape(-1),
                 self.world.n_cells, self._nb_table.shape[1],
                 ocfg.max_energy, ocfg.eat_efficiency, 0.1,
+                pcfg.attack_cost, pcfg.success_gene_gain,
+                pcfg.success_floor, pcfg.success_ceil,
+                pcfg.transfer_ratio, pcfg.stomach_transfer,
             )
         else:
             # ── Python 分步：捕食 ──
@@ -711,7 +716,7 @@ class SphereEngine:
                 rand_prey = self.rng.integers(0, 1_000_000, size=len(attackers), dtype=np.int64)
                 rand_success = self.rng.random(len(attackers))
                 for k, idx in enumerate(attackers):
-                    if energy[idx] <= 0.1:
+                    if energy[idx] <= pcfg.attack_cost:
                         continue
                     nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
                     nb_mask = np.isin(self._flat[:P], nb) & (np.arange(P) != idx)
@@ -721,17 +726,17 @@ class SphereEngine:
                     prey = int(prey_candidates[int(rand_prey[k] % len(prey_candidates))])
                     if predation_mask[prey]:
                         continue
-                    energy[idx] -= 0.1
+                    energy[idx] -= pcfg.attack_cost
                     success_rate = np.clip(
                         (energy[idx] / max(energy[idx] + energy[prey], 1e-9))
-                        * (0.5 + attack_gene[idx] * 0.5),
-                        0.1, 0.9,
+                        * (0.5 + attack_gene[idx] * pcfg.success_gene_gain),
+                        pcfg.success_floor, pcfg.success_ceil,
                     )
                     if rand_success[k] < success_rate:
                         predation_mask[prey] = True
-                        energy[idx] += energy[prey] * 0.4
+                        energy[idx] += energy[prey] * pcfg.transfer_ratio
                         stomach[idx] = np.minimum(
-                            stomach[idx] + stomach[prey] * 0.4,
+                            stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
                             ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
                         )
                         stomach[prey] = 0.0
@@ -941,7 +946,7 @@ class SphereEngine:
 
         # 2) 事件收益
         delta_e = np.clip((energy_now - energy_before) / max_e, -1.0, 1.0)
-        social = np.where(n_count > 0, 0.2, -0.1)  # 有同伴→正，孤独→负
+        social = np.where(n_count > 0, pcfg.social_rpe, pcfg.alone_rpe)  # 有同伴→正，孤独→负
         # 信息增益：所在格有信号标记 → 获得信息（好奇心满足），权重提高
         info = np.where(self.signals._marks[flat] > 0, 0.5, 0.0)
         reward = pcfg.w_energy * delta_e + pcfg.w_info * info + pcfg.w_social * social

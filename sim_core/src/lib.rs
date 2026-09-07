@@ -398,6 +398,12 @@ fn predation_and_culture(
     max_energy: f64,
     eat_efficiency: f64,
     culture_alpha: f64,
+    attack_cost: f64,
+    success_gene_gain: f64,
+    success_floor: f64,
+    success_ceil: f64,
+    transfer_ratio: f64,
+    stomach_transfer: f64,
 ) -> PyResult<()> {
     let n = flat.as_array().len();
     require_len("energy", unsafe { energy.as_array().len() }, n)?;
@@ -452,6 +458,8 @@ fn predation_and_culture(
         neighbors.as_slice()?,
         n_cells, nb_stride, gene_count,
         max_energy, eat_efficiency, culture_alpha,
+        attack_cost, success_gene_gain, success_floor, success_ceil,
+        transfer_ratio, stomach_transfer,
     );
     Ok(())
 }
