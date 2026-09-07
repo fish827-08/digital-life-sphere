@@ -48,6 +48,67 @@ fn native_gene_indicators() -> Vec<(String, usize)> {
     ]
 }
 
+/// 完整基因双写校验：Python 侧传入全部基因的 (name, value)，与 Rust 侧常量逐位对照。
+///
+/// 返回不一致列表 [(name, rust_value, py_value), ...]；空列表表示全部一致。
+/// 用于 tests/test_genes_registry.py 的漂移检测：故意改一侧索引→此函数返回非空。
+#[pyfunction]
+fn validate_gene_wiring(
+    py_names: Vec<String>,
+    py_values: Vec<usize>,
+) -> Vec<(String, usize, usize)> {
+    use crate::genes::*;
+    // Rust 侧全部常量（与 genes.rs 一一对应，新增基因时必须同步追加）
+    let rust_all: Vec<(&str, usize)> = vec![
+        ("G_MOVE_PROB", G_MOVE_PROB),
+        ("G_METABOLIC", G_METABOLIC),
+        ("G_REPRO_THRESHOLD", G_REPRO_THRESHOLD),
+        ("G_LIFE_GENE", G_LIFE_GENE),
+        ("G_EAT_AMOUNT", G_EAT_AMOUNT),
+        ("G_STOMACH_CAP", G_STOMACH_CAP),
+        ("G_MOVE_COST", G_MOVE_COST),
+        ("G_PARENTAL_INVEST", G_PARENTAL_INVEST),
+        ("G_PHOTOSYNTHESIS", G_PHOTOSYNTHESIS),
+        ("G_HOMEOTHERM", G_HOMEOTHERM),
+        ("G_FORAGE_NEIGHBOR", G_FORAGE_NEIGHBOR),
+        ("G_TEMP_PREF", G_TEMP_PREF),
+        ("G_REPRO_COOLDOWN", G_REPRO_COOLDOWN),
+        ("G_SOCIABILITY", G_SOCIABILITY),
+        ("G_PERCEPTION", G_PERCEPTION),
+        ("G_SIGNAL_STRENGTH", G_SIGNAL_STRENGTH),
+        ("G_AGGRESSION", G_AGGRESSION),
+        ("G_DIET", G_DIET),
+        ("G_DEFENSE", G_DEFENSE),
+        ("G_ROOTING", G_ROOTING),
+        ("G_HEDONISM", G_HEDONISM),
+        ("G_PROCESSING", G_PROCESSING),
+        ("G_TRUST_GENE", G_TRUST_GENE),
+        ("G_RESERVED", G_RESERVED),
+    ];
+
+    let mut drift = Vec::new();
+    if py_names.len() != rust_all.len() {
+        // 数量不一致本身就是漂移（但不 panic，返回差异供调用方判断）
+        drift.push((
+            format!("COUNT_MISMATCH(rust={}, py={})", rust_all.len(), py_names.len()),
+            rust_all.len(),
+            py_names.len(),
+        ));
+    }
+    let n = py_names.len().min(rust_all.len());
+    for i in 0..n {
+        let (r_name, r_val) = rust_all[i];
+        let p_name = &py_names[i];
+        let p_val = py_values[i];
+        // 名字比对：Python 侧传 "MOVE_PROB"，Rust 侧是 "G_MOVE_PROB"，去掉 G_ 前缀
+        let r_name_stripped = r_name.strip_prefix("G_").unwrap_or(r_name);
+        if r_name_stripped != p_name.as_str() || r_val != p_val {
+            drift.push((p_name.clone(), r_val, p_val));
+        }
+    }
+    drift
+}
+
 /// regrow：资源场再生（3.2）。
 ///
 /// 语义与 `world/resource_field.py::ResourceField.regrow` 逐位等价：
@@ -654,5 +715,6 @@ fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(signal_emit, m)?)?;
     m.add_function(wrap_pyfunction!(pleasure_update, m)?)?;
     m.add_function(wrap_pyfunction!(native_gene_indicators, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_gene_wiring, m)?)?;
     Ok(())
 }

@@ -144,3 +144,87 @@ _GENE_WIRED: set[int] = {
     int(Gene.SIGNAL_STRENGTH), int(Gene.AGGRESSION), int(Gene.ROOTING),
 }
 GENE_WIRED: frozenset[int] = frozenset(_GENE_WIRED)
+
+# 基因元数据（G3，C3 基因扩展性）：每基因的进化参数，观察台/分析工具直接消费。
+# 与 GENE_SEMANTICS 平行，index = 列索引；纯扩展，不改变引擎行为。
+#
+# 字段说明：
+# - mutation_scale: 突变标准差（高斯突变的 σ）。核心代谢/寿命基因保守（小），
+#   探索性基因（信号/感知/群居）宽松（大）；预留位用默认 0.1。
+# - selection_direction: 选择方向。+1=高值正向选择（越高越有利），
+#   -1=低值负向选择（越低越有利），0=中性/依赖环境。仅作观察台标注用，
+#   引擎不强制（选择压来自生态动力学，不来自此元数据）。
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class GeneMeta:
+    """单基因元数据。"""
+    mutation_scale: float
+    selection_direction: int  # +1 / 0 / -1
+
+
+GENE_META: tuple[GeneMeta, ...] = (
+    GeneMeta(0.05, 0),    # g0  移动概率：中性（依赖环境）
+    GeneMeta(0.03, 0),    # g1  代谢倍率：保守，中性
+    GeneMeta(0.05, -1),   # g2  繁殖阈值：低阈值易繁殖（负向选择，但受资源约束）
+    GeneMeta(0.02, 0),    # g3  寿命基因：高度保守
+    GeneMeta(0.05, 1),    # g4  进食量：高值有利（正向选择）
+    GeneMeta(0.05, 1),    # g5  胃容量：高值有利
+    GeneMeta(0.03, -1),   # g6  移动能耗：低值有利（负向选择）
+    GeneMeta(0.05, 0),    # g7  传代投入：中性（r/K 策略权衡）
+    GeneMeta(0.05, 1),    # g8  光合产能：高值有利（植物化路径）
+    GeneMeta(0.05, 0),    # g9  恒温性：中性（温度依赖）
+    GeneMeta(0.05, 1),    # g10 邻格觅食倾向：高值有利（资源稀缺时）
+    GeneMeta(0.05, 0),    # g11 温度偏好：中性（环境依赖）
+    GeneMeta(0.05, -1),   # g12 繁殖冷却：低值有利（繁殖快），但受资源约束
+    GeneMeta(0.08, 0),    # g13 群居性：探索性，中性（密度依赖）
+    GeneMeta(0.08, 1),    # g14 感知半径：探索性，高值有利（信息优势）
+    GeneMeta(0.10, 0),    # g15 信号发射概率：高探索性，中性（信号成本/收益权衡）
+    GeneMeta(0.08, 0),    # g16 攻击性：中性（捕食/防御权衡，密度依赖）
+    GeneMeta(0.10, 0),    # g17 食性（预留）：默认
+    GeneMeta(0.10, 0),    # g18 防御（预留）：默认
+    GeneMeta(0.08, 1),    # g19 植物化扎根：高值有利（静态生态位）
+    GeneMeta(0.10, 0),    # g20 享乐敏感（预留）：默认
+    GeneMeta(0.10, 0),    # g21 处理位（预留）：默认
+    GeneMeta(0.10, 0),    # g22 信任阈值（预留）：默认
+    GeneMeta(0.10, 0),    # g23 预留：默认
+)
+
+
+def gene_meta(idx: int) -> GeneMeta:
+    """按列索引取基因元数据。
+
+    Args:
+        idx: 列索引（0~GENE_COUNT-1）。
+    Returns:
+        GeneMeta（mutation_scale, selection_direction）。
+    Raises:
+        IndexError: 索引越界。
+    """
+    if not 0 <= idx < GENE_COUNT:
+        raise IndexError(f"基因索引 {idx} 越界（0~{GENE_COUNT-1}）")
+    return GENE_META[idx]
+
+
+def validate_gene_wiring() -> list[tuple[str, int, int]]:
+    """Python ↔ Rust 基因索引双写校验（G2，C3 基因扩展性）。
+
+    把 Python 侧 Gene 枚举的全部 (name, value) 传给 Rust 侧 validate_gene_wiring，
+    逐位对照。返回不一致列表 [(name, rust_value, py_value), ...]；空列表表示一致。
+
+    用途：
+    - 引擎初始化时调用（use_sim_core=True），漂移则直接报错。
+    - tests/test_genes_registry.py 调用，故意改一侧索引→返回非空→测试通过。
+
+    Returns:
+        不一致列表；空列表表示全部一致。
+    """
+    try:
+        import sim_core
+    except ImportError:
+        # sim_core 未安装时跳过校验（纯 Python 路径不需要 Rust 侧常量）
+        return []
+    py_names = [g.name for g in Gene]
+    py_values = [int(g) for g in Gene]
+    return sim_core.validate_gene_wiring(py_names, py_values)
