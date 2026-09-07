@@ -1171,3 +1171,195 @@ class SphereEngine:
             "baseline_mean": float(self._baseline.mean()),
             "expectation_mean": float(self._expectation.mean()),
         }
+
+    # ============================================================
+    # 快照机制：支持长实验分段续跑（v2，适配 L10a + 统计数组）
+    # ============================================================
+
+    SNAPSHOT_VERSION = 2
+
+    def save_snapshot(self, path: str) -> None:
+        """保存完整引擎状态到 npz 文件（压缩）。
+
+        保存内容：种群数组 + 愉悦度/学习数组 + L10a 果实场 + 资源场/信号场状态
+        + RNG 状态 + 元数据 + 配置指纹。
+        恢复后继续运行的结果与"不保存连续运行"逐位一致（可复现）。
+
+        v2 变更：新增 _run_born/_run_died/_run_deaths 统计 + L10a 果实场数组
+        + resources 再生参数；与 v1 快照不兼容。
+        """
+        import json
+        import pickle
+
+        P = len(self._id)
+        data = {}
+
+        # --- 1. 种群 SoA 数组（只保存有效部分 [:P]）---
+        data["id"] = self._id[:P].copy()
+        data["flat"] = self._flat[:P].copy()
+        data["energy"] = self._energy[:P].copy()
+        data["stomach"] = self._stomach[:P].copy()
+        data["genes"] = self._genes[:P].copy()
+        data["age"] = self._age[:P].copy()
+        data["generation"] = self._generation[:P].copy()
+        data["parent"] = self._parent[:P].copy()
+        data["repro_cooldown"] = self._repro_cooldown[:P].copy()
+
+        # --- 2. 愉悦度数组 ---
+        data["valence"] = self._valence[:P].copy()
+        data["arousal"] = self._arousal[:P].copy()
+        data["expectation"] = self._expectation[:P].copy()  # (P, 120)
+        data["baseline"] = self._baseline[:P].copy()
+
+        # --- 3. 学习数组 ---
+        data["trust"] = self._trust[:P].copy()
+        data["work_memory"] = self._work_memory[:P].copy()  # (P, 4)
+        data["mem_ptr"] = np.array(self._mem_ptr)
+        data["interpret"] = self._interpret[:P].copy()  # (P, 16)
+
+        # --- 3.5 L10a 果实-种子传播数组 ---
+        data["fruit_grid"] = self._fruit_grid.copy()  # (n_cells,)
+        data["fruit_charge"] = self._fruit_charge[:P].copy()
+        data["seed_carried"] = self._seed_carried[:P].copy()
+
+        # --- 4. 世界状态（资源场 + 信号场）---
+        data["resource_grid"] = self.resources._grid.copy()
+        data["resource_capacity"] = self.resources._capacity.copy()
+        data["resource_patch_mask"] = self.resources._patch_mask.copy()
+        data["resource_bg_regrowth_mult"] = np.array(self.resources._bg_regrowth_mult)
+        data["resource_patch_regrowth_mult"] = np.array(self.resources._patch_regrowth_mult)
+        data["signal_marks"] = self.signals._marks.copy()
+        data["signal_age"] = self.signals._age.copy()
+
+        # --- 5. 运行统计 ---
+        data["run_born"] = np.array(self._run_born)
+        data["run_died"] = np.array(self._run_died)
+        # _run_deaths 是 Counter，用 pickle 序列化
+        data["run_deaths"] = np.array(pickle.dumps(dict(self._run_deaths)), dtype=object)
+
+        # --- 6. RNG 状态（可复现的关键）---
+        data["rng_state"] = np.array(
+            pickle.dumps(self.rng.bit_generator.state), dtype=object
+        )
+
+        # --- 7. 元数据 ---
+        data["snapshot_version"] = np.array(self.SNAPSHOT_VERSION)
+        data["tick"] = np.array(self._tick)
+        data["next_id"] = np.array(self._next_id)
+        data["max_generation"] = np.array(self._max_generation)
+        data["count"] = np.array(P)
+        data["extinct"] = np.array(self._extinct)
+        data["finished"] = np.array(self._finished)
+        data["gene_count"] = np.array(self.config.genome.gene_count)
+        data["use_sim_core"] = np.array(self._use_sim_core)
+        data["config_fingerprint"] = np.array(self.config.fingerprint())
+        data["config_dict"] = np.array(
+            json.dumps(self.config.to_dict(), ensure_ascii=False), dtype=object
+        )
+
+        np.savez_compressed(path, **data)
+
+    @classmethod
+    def load_snapshot(cls, path: str, config=None):
+        """从快照文件恢复引擎。
+
+        Args:
+            path: 快照文件路径
+            config: 引擎配置。为 None 时从快照中恢复配置；
+                    提供时校验 fingerprint 与快照一致。
+
+        Returns:
+            恢复后的 SphereEngine 实例
+
+        Raises:
+            ValueError: 快照版本不兼容 / 配置指纹不匹配 / gene_count 不匹配
+        """
+        import json
+        import pickle
+        from collections import Counter
+
+        data = np.load(path, allow_pickle=True)
+
+        # --- 1. 版本校验 ---
+        snap_version = int(data["snapshot_version"])
+        if snap_version != cls.SNAPSHOT_VERSION:
+            raise ValueError(
+                f"快照版本 {snap_version} 不兼容，当前版本 {cls.SNAPSHOT_VERSION}"
+            )
+
+        # --- 2. 配置处理 ---
+        if config is None:
+            from simulation.config import SimConfig
+            config = SimConfig.from_dict(json.loads(str(data["config_dict"])))
+        else:
+            snap_fp = str(data["config_fingerprint"])
+            cur_fp = config.fingerprint()
+            if snap_fp != cur_fp:
+                raise ValueError(
+                    f"配置指纹不匹配：快照={snap_fp[:16]}...，当前={cur_fp[:16]}..."
+                )
+
+        # --- 3. gene_count 校验 ---
+        snap_gc = int(data["gene_count"])
+        if snap_gc != config.genome.gene_count:
+            raise ValueError(
+                f"gene_count 不匹配：快照={snap_gc}，当前={config.genome.gene_count}"
+            )
+
+        # --- 4. 创建引擎（__init__ 会创建初始种群，后续覆盖）---
+        engine = cls(config)
+
+        # --- 5. 恢复种群数组 ---
+        engine._id = data["id"].copy()
+        engine._flat = data["flat"].copy()
+        engine._energy = data["energy"].copy()
+        engine._stomach = data["stomach"].copy()
+        engine._genes = data["genes"].copy()
+        engine._age = data["age"].copy()
+        engine._generation = data["generation"].copy()
+        engine._parent = data["parent"].copy()
+        engine._repro_cooldown = data["repro_cooldown"].copy()
+
+        # --- 6. 恢复愉悦度数组 ---
+        engine._valence = data["valence"].copy()
+        engine._arousal = data["arousal"].copy()
+        engine._expectation = data["expectation"].copy()
+        engine._baseline = data["baseline"].copy()
+
+        # --- 7. 恢复学习数组 ---
+        engine._trust = data["trust"].copy()
+        engine._work_memory = data["work_memory"].copy()
+        engine._mem_ptr = int(data["mem_ptr"])
+        engine._interpret = data["interpret"].copy()
+
+        # --- 7.5 恢复 L10a 数组 ---
+        engine._fruit_grid = data["fruit_grid"].copy()
+        engine._fruit_charge = data["fruit_charge"].copy()
+        engine._seed_carried = data["seed_carried"].copy()
+
+        # --- 8. 恢复世界状态 ---
+        engine.resources._grid = data["resource_grid"].copy()
+        engine.resources._capacity = data["resource_capacity"].copy()
+        engine.resources._patch_mask = data["resource_patch_mask"].copy()
+        engine.resources._bg_regrowth_mult = float(data["resource_bg_regrowth_mult"])
+        engine.resources._patch_regrowth_mult = float(data["resource_patch_regrowth_mult"])
+        engine.signals._marks = data["signal_marks"].copy()
+        engine.signals._age = data["signal_age"].copy()
+
+        # --- 8.5 恢复运行统计 ---
+        engine._run_born = int(data["run_born"])
+        engine._run_died = int(data["run_died"])
+        engine._run_deaths = Counter(pickle.loads(data["run_deaths"].item()))
+
+        # --- 9. 恢复 RNG 状态 ---
+        rng_state = pickle.loads(data["rng_state"].item())
+        engine.rng.bit_generator.state = rng_state
+
+        # --- 10. 恢复元数据 ---
+        engine._tick = int(data["tick"])
+        engine._next_id = int(data["next_id"])
+        engine._max_generation = int(data["max_generation"])
+        engine._extinct = bool(data["extinct"])
+        engine._finished = bool(data["finished"])
+
+        return engine
