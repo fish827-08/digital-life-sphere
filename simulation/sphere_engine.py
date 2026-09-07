@@ -41,6 +41,7 @@ from numpy.typing import NDArray
 
 from core.lifecycle import DeathCause
 from simulation.config import SimConfig
+from simulation.genes import Gene
 from simulation.tick import TickStats
 from world.light_and_temperature import LightAndTemperature
 from world.resource_field import ResourceField
@@ -136,6 +137,23 @@ class SphereEngine:
                     " `.venv\\Scripts\\python -m maturin develop`"
                 ) from exc
             self._sim_core = sim_core
+            # Rust 基因索引常量 ↔ simulation.genes 注册表对照：防双写漂移。
+            # native_gene_indicators() 返回 [(Rust 语义名, 值), ...]，
+            # 任一项与 Python Gene 枚举不一致 ⇒ 引擎初始化直接报错。
+            _native = getattr(sim_core, "native_gene_indicators", None)
+            if _native is not None:
+                _rust_const = {n: int(v) for n, v in _native()}
+                _py_const = {g.name: int(g) for g in Gene}
+                _drift = [
+                    f"sim_core.{n}={v} != Gene.{n}={_py_const[n]}"
+                    for n, v in _rust_const.items()
+                    if n in _py_const and _py_const[n] != v
+                ]
+                if _drift:
+                    raise RuntimeError(
+                        "基因双写漂移：" + "; ".join(_drift)
+                        + " —— 请同步 simulation/genes.py 与 sim_core/src/genes.rs"
+                    )
         else:
             self._sim_core = None
         self.world = SphereWorld(
@@ -383,12 +401,12 @@ class SphereEngine:
         # 0) 个体化温度响应（恒温基因 g9 + 温度偏好基因 g11）：
         #    冷血（g9=0）完全随环境：低温时消化慢、行动贵；
         #    恒温（g9=1）内部温度恒定：低温不再压制，但每 tick 多扣维持费。
-        homeo = genes[:, 9]
+        homeo = genes[:, Gene.HOMEOTHERM]
         eff_activity = activity + homeo * (1.0 - activity)
         #    温度偏好（g11）：冷血个体只在自己偏好的温度附近才满速，
         #    偏离越远越慢（偏离 15° 活力掉到 ≈6 成）；恒温者不受影响。
         #    偏好温度 = -10 + g11×50，落在 [-10°C, 40°C] 覆盖全地图谱系。
-        pref_temp = -10.0 + genes[:, 11] * 50.0
+        pref_temp = -10.0 + genes[:, Gene.TEMP_PREF] * 50.0
         grid_temp = self.light.temperature(self._flat, self._tick)
         niche_match = np.exp(-0.5 * ((grid_temp - pref_temp) / 15.0) ** 2)
         eff_activity = np.where(
@@ -416,14 +434,14 @@ class SphereEngine:
             #    植物化增强（g19）在 stage1 之后统一补，确保双路径一致。
             energy += (
                 self.light.illumination(self._flat, self._tick)
-                * genes[:, 8]
+                * genes[:, Gene.PHOTOSYNTHESIS]
                 * ocfg.photo_max
             )
 
             # 2) 代谢转化：胃 → 能量（总量不变，快慢受温度+基因影响）
             #    转化速率 = base_metabolism × metabolic_mult × eff_activity
             #    metabolic_mult = 0.5 + g1×1.5（基因放大代谢快慢）
-            metab_mult = 0.5 + genes[:, 1] * 1.5
+            metab_mult = 0.5 + genes[:, Gene.METABOLIC] * 1.5
             digest_rate = ocfg.base_metabolism * metab_mult * eff_activity
             # 每 tick 最多转化这么多；不得超出胃里有的
             digest = np.minimum(stomach, digest_rate)
@@ -434,7 +452,7 @@ class SphereEngine:
             #    随年龄的"需求"阶段：幼体在长身体（growth_mult 倍）→
             #    成年（1 倍）→ 老年器官退化（senile_mult 倍）。
             #    成熟/老年年龄按各自寿命（g3）的比例划分，寿命长的物种成熟和老化都更晚。
-            life_span = self._lifespan(genes[:, 3])
+            life_span = self._lifespan(genes[:, Gene.LIFE_GENE])
             age_f = self._age[:P].astype(np.float64)
             maturity_age = ocfg.maturity_fraction * life_span
             senile_age = ocfg.senile_fraction * life_span
@@ -449,16 +467,16 @@ class SphereEngine:
         #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入
         energy += (
             self.light.illumination(self._flat, self._tick)
-            * genes[:, 8]
-            * genes[:, 19]
+            * genes[:, Gene.PHOTOSYNTHESIS]
+            * genes[:, Gene.ROOTING]
             * ocfg.photo_max
         )
 
         # 4) 进食：从格子里吃进胃（先吃后扣基础维持，保证当天能吃到）
         #    饱食度：胃容量上限（基础 = max_energy/eat_efficiency/2，g5 缩放 0.5~2 倍）
         #    进食量：每 tick 最多 eat_amount（g4 缩放 0.5~1.5 倍）
-        eat_mult = 0.5 + genes[:, 4] * 1.0
-        cap_mult = 0.5 + genes[:, 5] * 1.5
+        eat_mult = 0.5 + genes[:, Gene.EAT_AMOUNT] * 1.0
+        cap_mult = 0.5 + genes[:, Gene.STOMACH_CAP] * 1.5
         stomach_cap = (
             ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult
         )
@@ -480,7 +498,7 @@ class SphereEngine:
             # 邻格觅食（g10）：自己格不够吃的个体，随机吃一格外邻格
             short = want - taken
             hung = np.flatnonzero(short > 1e-9)
-            hunter = self._genes[hung, 10] >= 0.5
+            hunter = self._genes[hung, Gene.FORAGE_NEIGHBOR] >= 0.5
             if hunter.any():
                 hf = hung[hunter]
                 targets = np.empty(int(hunter.sum()), dtype=np.int64)
@@ -510,7 +528,7 @@ class SphereEngine:
 
         # 4.5) 信号发射（g15）：以基因概率在当前格写入田字格标记，耗能
         #     模式 = 状态哈希（能量2位 + 食物1位 + 邻居1位 = 4位=16种）
-        signal_gene = genes[:, 15]
+        signal_gene = genes[:, Gene.SIGNAL_STRENGTH]
         emitters = np.flatnonzero(self.rng.random(P) < signal_gene)
         if len(emitters):
             SIGNAL_COST = 0.1  # 发射成本（降低，让信号基因不被纯成本淘汰）
@@ -535,8 +553,8 @@ class SphereEngine:
         # 5) 移动：g19 植物化降低移动概率（g0 × (1-g19)）
         #    use_sim_core=True：移动决策下沉到 Rust（step_movement），移动耗能在 Rust 内扣；
         #    stage2 只做年龄/冷却（moved_raw 全 False，不重复扣移动耗能）。
-        move_prob = genes[:, 0] * (1.0 - genes[:, 19])
-        move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, 6])
+        move_prob = genes[:, Gene.MOVE_PROB] * (1.0 - genes[:, Gene.ROOTING])
+        move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, Gene.MOVE_COST])
         if self._use_sim_core:
             moved_raw = self.rng.random(P) < move_prob
             mi = np.flatnonzero(moved_raw & (energy >= move_cost_ind))
@@ -608,8 +626,8 @@ class SphereEngine:
                     if len(nb) == 1:
                         targets[i] = nb[0]
                         continue
-                    perc = genes[idx, 14]
-                    soc = (genes[idx, 13] - 0.5) * 2.0
+                    perc = genes[idx, Gene.PERCEPTION]
+                    soc = (genes[idx, Gene.SOCIABILITY] - 0.5) * 2.0
                     score = perc * (
                         food_ratio[nb] * 0.5 + sig_present[nb] * 0.5 * self._trust[idx]
                     ) + soc * densities[nb]
@@ -646,7 +664,7 @@ class SphereEngine:
         # 5.5) 捕食（g16）+ 6.5) 文化学习（L5）：use_sim_core=True 时合并为一次 Rust 调用，
         #     共用一次 cell→个体 CSR 构建，消除重复开销。use_sim_core=False 时分步执行。
         predation_mask = np.zeros(P, dtype=bool)
-        attack_gene = genes[:, 16]
+        attack_gene = genes[:, Gene.AGGRESSION]
         hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
         attack_prob = attack_gene * 0.2 * hunger
         attackers = np.flatnonzero(
@@ -654,7 +672,7 @@ class SphereEngine:
         )
         # 文化学习需要的成熟年龄（年龄已在 stage2 推进，use_sim_core=True 时）
         age_f = self._age[:P].astype(np.float64)
-        life_span = self._lifespan(genes[:, 3])
+        life_span = self._lifespan(genes[:, Gene.LIFE_GENE])
         maturity_age = ocfg.maturity_fraction * life_span
 
         if self._use_sim_core:
@@ -743,7 +761,7 @@ class SphereEngine:
             self._repro_cooldown[:P] = np.maximum(
                 0.0, self._repro_cooldown[:P] - 1.0
             )
-        repro_thr = (0.25 + genes[:, 2] * 0.65) * ocfg.max_energy
+        repro_thr = (0.25 + genes[:, Gene.REPRO_THRESHOLD] * 0.65) * ocfg.max_energy
         repro = (
             (~dead)
             & (energy >= repro_thr)
@@ -764,13 +782,13 @@ class SphereEngine:
                     gcfg.gene_min, gcfg.gene_max,
                 )
             # 传代投入比例（g7）：亲代把多少比例的能量/胃粮分给子代（0.3~0.7）
-            split = 0.3 + genes[ri, 7] * 0.4
+            split = 0.3 + genes[ri, Gene.PARENTAL_INVEST] * 0.4
             child_energy = energy[ri] * split
             child_stomach = stomach[ri] * split
             energy[ri] -= child_energy
             stomach[ri] -= child_stomach
             # 生完进入冷却（g12）：间隔 = g12 × 60 tick，冷却没到攒再多也不生
-            self._repro_cooldown[ri] = genes[ri, 12] * 60.0
+            self._repro_cooldown[ri] = genes[ri, Gene.REPRO_COOLDOWN] * 60.0
 
             ids = np.arange(self._next_id, self._next_id + K, dtype=np.int64)
             self._next_id += K

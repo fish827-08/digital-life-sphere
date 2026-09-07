@@ -16,14 +16,35 @@
 //! 温度/光照等环境量目前仍由 Python 侧计算后传入。
 mod consume;
 mod culture;
+mod genes;
 mod l4_l5;
 mod movement;
 mod predation;
 mod regrow;
 mod step_vectors;
 
+/// 基因位索引常量（与 Python simulation.genes 注册表对应），供绑定层对外导出
+// 说明：常量定义在 genes.rs（G_MOVE_PROB 等），这里仅 re-export 供 Python 侧
+// 校验函数比对（validate_gene_wiring 直接引用 crate::genes::* 即可，无需 re-export）。
+pub use genes::G_AGGRESSION;
+pub use genes::G_PERCEPTION;
+pub use genes::G_SOCIABILITY;
+
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
+
+/// 导出 Rust 侧基因索引常量，供 Python 侧与 simulation.genes 注册表逐位对照。
+/// 返回 [(Rust 常量名, Rust 值, Python 语义名), ...]；值不一致时引擎初始化
+/// 会直接报错，防止双写漂移静默变成错误行为。
+#[pyfunction]
+fn native_gene_indicators() -> Vec<(String, usize)> {
+    use crate::genes::*;
+    vec![
+        (stringify!(G_SOCIABILITY).to_string(), G_SOCIABILITY),
+        (stringify!(G_PERCEPTION).to_string(), G_PERCEPTION),
+        (stringify!(G_AGGRESSION).to_string(), G_AGGRESSION),
+    ]
+}
 
 /// regrow：资源场再生（3.2）。
 ///
@@ -496,5 +517,6 @@ fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(predation_attack, m)?)?;
     m.add_function(wrap_pyfunction!(predation_and_culture, m)?)?;
     m.add_function(wrap_pyfunction!(step_movement, m)?)?;
+    m.add_function(wrap_pyfunction!(native_gene_indicators, m)?)?;
     Ok(())
 }

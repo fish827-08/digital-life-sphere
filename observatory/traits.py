@@ -18,45 +18,22 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from simulation.genes import GENE_TRAIT_NAMES, Gene
+
 # 24 个基因位的语义名（与引擎 _genes 列一一对应；索引即基因序号）。
+# 统一由 simulation.genes 注册表提供，避免引擎/观测台/文档三处手抄漂移。
 # g14~g23 为 L2/L4 大改造新增；其中 g17/g18/g20~g23 引擎未接线（预留位），
 # trait 表仍如实列出，便于观察台跟踪其漂移。
-GENE_TRAIT_NAMES: tuple[str, ...] = (
-    "move_prob",          # g0  移动概率
-    "metabolic",          # g1  代谢倍率（消化快慢）
-    "repro_threshold",    # g2  繁殖能量门槛
-    "life_gene",          # g3  寿命基因（影响 lifespan 派生）
-    "eat_amount",         # g4  进食量
-    "stomach_cap",        # g5  胃容量
-    "move_cost",          # g6  移动能耗
-    "parental_invest",    # g7  传代投入（分给子代的能量比例）
-    "photosynthesis",     # g8  光合产能
-    "homeotherm",         # g9  恒温性
-    "forage_neighbor",    # g10 邻格觅食倾向
-    "temp_pref",          # g11 温度偏好
-    "repro_cooldown",     # g12 繁殖冷却长度
-    "sociability",        # g13 群居性
-    "perception",         # g14 感知半径（移动决策邻居深度，L3）
-    "signal_strength",    # g15 信号发射概率（L3）
-    "aggression",         # g16 攻击性（捕食概率，L4）
-    "diet",               # g17 食性（未接线，预留）
-    "defense",            # g18 防御（未接线，预留）
-    "rooting",            # g19 植物化扎根（移动概率 ×(1-g19) + 额外光合，L4）
-    "hedonism",           # g20 享乐敏感（未接线，预留）
-    "processing",         # g21 处理位（未接线，预留）
-    "trust_gene",         # g22 信任阈值（未接线，预留）
-    "reserved",           # g23 预留
-)
 
 # 派生 trait：由基因 + 环境基准（一昼夜 tick 数）解码，非独立基因位。
 # 每个派生 trait = (名字, 解码函数)。函数输入 (genes_2d, day_length)。
 _DERIVED_TRAITS: tuple[tuple[str, ...], ...] = (
     # 寿命（tick）＝一昼夜 × (1 + g3×7)：与引擎 _lifespan() 同一公式。
-    ("life_span", lambda g, day: day * (1.0 + g[:, 3] * 7.0)),
+    ("life_span", lambda g, day: day * (1.0 + g[:, Gene.LIFE_GENE] * 7.0)),
     # 代谢倍率 ＝ 0.5 + g1×1.5：消化/维持按它缩放（与引擎 stage1 同一公式）。
-    ("metabolic_mult", lambda g, day: 0.5 + g[:, 1] * 1.5),
+    ("metabolic_mult", lambda g, day: 0.5 + g[:, Gene.METABOLIC] * 1.5),
     # 成熟年龄 ＝ 寿命 × 成熟比例（0.15）：达到才能繁衍。
-    ("maturity_age", lambda g, day: 0.15 * day * (1.0 + g[:, 3] * 7.0)),
+    ("maturity_age", lambda g, day: 0.15 * day * (1.0 + g[:, Gene.LIFE_GENE] * 7.0)),
 )
 
 TRAIT_ORDER: tuple[str, ...] = GENE_TRAIT_NAMES + tuple(

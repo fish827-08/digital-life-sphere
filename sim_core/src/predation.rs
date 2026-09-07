@@ -5,6 +5,8 @@
 //!   - `predation_attack`：自包含（自己构建 CSR），供独立调用/对拍
 //!   - `predation_attack_with_csr`：接收预构建 CSR，供 l4_l5 合并调用
 
+use crate::genes::G_AGGRESSION;
+
 /// 捕食核心（接收预构建 CSR）。
 #[allow(clippy::too_many_arguments)]
 pub fn predation_attack_with_csr(
@@ -82,7 +84,7 @@ pub fn predation_attack_with_csr(
 
         let total = energy[idx] + energy[prey];
         let energy_ratio = energy[idx] / total.max(1e-9);
-        let g16 = genes[idx * gene_count + 16];
+        let g16 = genes[idx * gene_count + G_AGGRESSION];
         let success_rate = (energy_ratio * (0.5 + g16 * 0.5)).clamp(0.1, 0.9);
 
         if rand_success[k] < success_rate {

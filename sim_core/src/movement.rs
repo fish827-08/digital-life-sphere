@@ -10,6 +10,8 @@
 //! 优化点：消除逐个体 Python 循环 + np.isin + np.max/min + np.argmax + np.array 等
 //! 大量 numpy 小函数调用开销（N=5000 时占总耗时 50%+）。
 
+use crate::genes::{G_PERCEPTION, G_SOCIABILITY};
+
 /// 移动决策核心函数。
 ///
 /// # 参数
@@ -65,8 +67,8 @@ pub fn step_movement(
             continue;
         }
 
-        let perc = genes[idx * gene_count + 14];
-        let soc = (genes[idx * gene_count + 13] - 0.5) * 2.0;
+        let perc = genes[idx * gene_count + G_PERCEPTION];
+        let soc = (genes[idx * gene_count + G_SOCIABILITY] - 0.5) * 2.0;
         let trust_val = trust[idx];
 
         // 收集有效邻居（>=0），同时计算得分
