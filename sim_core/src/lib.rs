@@ -21,6 +21,7 @@ mod l4_l5;
 mod movement;
 mod predation;
 mod regrow;
+mod signal;
 mod step_vectors;
 
 /// 基因位索引常量（与 Python simulation.genes 注册表对应），供绑定层对外导出
@@ -539,6 +540,49 @@ fn step_movement(
     Ok(())
 }
 
+/// signal_emit：信号发射（L3 g15），批量判定发射、耗能、编码模式、写入信号场。
+///
+/// 语义与 sphere_engine 步骤 4.5 逐位等价。energy/signal_marks/signal_age 就地更新。
+/// rand_emit 由 Python 侧预生成（self.rng.random(P)），保证 RNG 消费顺序一致。
+/// densities 由 Python 侧预计算（np.bincount），与移动下沉共用。
+#[pyfunction]
+fn signal_emit(
+    flat: PyReadonlyArray1<'_, i64>,
+    energy: Bound<'_, PyArray1<f64>>,
+    g15: PyReadonlyArray1<'_, f64>,
+    rand_emit: PyReadonlyArray1<'_, f64>,
+    densities: PyReadonlyArray1<'_, f64>,
+    resource_grid: PyReadonlyArray1<'_, f64>,
+    resource_capacity: PyReadonlyArray1<'_, f64>,
+    signal_marks: Bound<'_, PyArray1<u8>>,
+    signal_age: Bound<'_, PyArray1<i32>>,
+    emit_cost: f64,
+    max_energy: f64,
+    duration: i32,
+) -> PyResult<usize> {
+    let n = flat.as_array().len();
+    require_len("energy", unsafe { energy.as_array().len() }, n)?;
+    require_len("g15", g15.as_array().len(), n)?;
+    require_len("rand_emit", rand_emit.as_array().len(), n)?;
+    let n_cells = densities.as_array().len();
+    require_len("resource_grid", resource_grid.as_array().len(), n_cells)?;
+    require_len("resource_capacity", resource_capacity.as_array().len(), n_cells)?;
+    require_len("signal_marks", unsafe { signal_marks.as_array().len() }, n_cells)?;
+    require_len("signal_age", unsafe { signal_age.as_array().len() }, n_cells)?;
+
+    let mut e = unsafe { energy.as_slice_mut()? };
+    let mut sm = unsafe { signal_marks.as_slice_mut()? };
+    let mut sa = unsafe { signal_age.as_slice_mut()? };
+
+    let n_emit = signal::signal_emit_batch(
+        flat.as_slice()?, &mut e, g15.as_slice()?, rand_emit.as_slice()?,
+        densities.as_slice()?, resource_grid.as_slice()?, resource_capacity.as_slice()?,
+        &mut sm, &mut sa,
+        emit_cost, max_energy, duration,
+    );
+    Ok(n_emit)
+}
+
 #[pymodule]
 fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(regrow_rs, m)?)?;
@@ -550,6 +594,7 @@ fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(predation_attack, m)?)?;
     m.add_function(wrap_pyfunction!(predation_and_culture, m)?)?;
     m.add_function(wrap_pyfunction!(step_movement, m)?)?;
+    m.add_function(wrap_pyfunction!(signal_emit, m)?)?;
     m.add_function(wrap_pyfunction!(native_gene_indicators, m)?)?;
     Ok(())
 }
