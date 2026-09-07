@@ -40,3 +40,4 @@ sim_core/target/
 # 实验输出与临时可视化
 long_run_result.txt
 language-path.html
+long_run_l4l5_result.txt
