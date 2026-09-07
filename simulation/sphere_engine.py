@@ -312,12 +312,9 @@ class SphereEngine:
 
     def _advance_one_tick(self) -> TickStats:
         # 顺序契约：先资源再生，再种群行动
-        # patchy 模式的再生含空间倍率（斑块快/背景慢，守恒），Rust 侧 regrow 暂未支持
-        # → patchy 时自动回退 Python 路径；uniform 保持双路径对拍
-        use_rust_regrow = (
-            self._use_sim_core and self.resources.distribution == "uniform"
-        )
-        if use_rust_regrow:
+        # uniform：Rust regrow（3.2）；patchy：Rust regrow_patchy（L7e，含空间倍率守恒）。
+        #   旧版 .pyd 没有 regrow_patchy 时特性检测回退 Python，保证双路径不炸。
+        if self._use_sim_core and self.resources.distribution == "uniform":
             # 3.4：资源再生长沉到 Rust（与 ResourceField.regrow 逐位等价，
             # 默认 temp_sensitivity=1.0 时严格一致；≠1 有 ≤1-ULP 差异）
             self._sim_core.regrow(
@@ -325,6 +322,23 @@ class SphereEngine:
                 self.light.temperature(
                     np.arange(self.world.n_cells), self._tick
                 ),
+                self.resources.regrowth_rate,
+                self.resources.temp_sensitivity,
+            )
+        elif (
+            self._use_sim_core
+            and self.resources.distribution == "patchy"
+            and hasattr(self._sim_core, "regrow_patchy")
+        ):
+            # L7e：patchy 再生下沉 Rust（斑块格×patch_mult / 背景格×bg_mult，守恒）
+            self._sim_core.regrow_patchy(
+                self.resources._grid, self.resources._capacity,
+                self.light.temperature(
+                    np.arange(self.world.n_cells), self._tick
+                ),
+                self.resources._patch_mask.astype(np.uint8),
+                self.resources._patch_regrowth_mult,
+                self.resources._bg_regrowth_mult,
                 self.resources.regrowth_rate,
                 self.resources.temp_sensitivity,
             )

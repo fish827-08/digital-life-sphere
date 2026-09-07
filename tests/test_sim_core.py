@@ -69,6 +69,59 @@ def test_regrow_inplace_no_new_object():
     )
 
 
+# ---- L7e：regrow_patchy 函数级对拍 -------------------------------------
+#
+# Rust regrow_patchy 与 ResourceField._regrowth_amount（distribution="patchy"）
+# 逐位等价：每格恢复量 = 再生率 × 温度因子 × 空间倍率（patch/bg），min 到容量。
+
+def make_patchy_field(rows=30, cols=60, temp_sensitivity=1.0):
+    world = SphereWorld(rows=rows, cols=cols)
+    light = LightAndTemperature(world, rotation_period=2400)
+    field = ResourceField(
+        world, light, temp_sensitivity=temp_sensitivity,
+        distribution="patchy", patch_count=6, patch_radius=2,
+        patch_capacity_mult=2.0, patch_regrowth_mult=2.0,
+        background_fill=0.1,
+    )
+    return world, light, field
+
+
+@pytest.mark.parametrize("ticks", [1, 37, 100])
+def test_regrow_patchy_bitwise_equal(ticks):
+    """patchy：跑 1/37/100 个 tick，Rust regrow_patchy 与 Python 逐位相等。"""
+    world, light, field = make_patchy_field()
+    rust_grid = field._grid.copy()
+    mask = field._patch_mask.astype(np.uint8)
+
+    for t in range(1, ticks + 1):
+        temps = light.temperature(np.arange(world.n_cells), t)
+        sim_core.regrow_patchy(
+            rust_grid, field._capacity, temps, mask,
+            field._patch_regrowth_mult, field._bg_regrowth_mult,
+            field.regrowth_rate, field.temp_sensitivity,
+        )
+        field.regrow(t)
+        np.testing.assert_array_equal(rust_grid, field._grid)
+
+
+def test_regrow_patchy_rejects_bad_length():
+    """长度不匹配应抛 ValueError（不是 UB / panic）。"""
+    world, light, field = make_patchy_field()
+    grid = field._grid.copy()
+    temps = np.zeros(world.n_cells, dtype=np.float64)
+    mask = field._patch_mask.astype(np.uint8)
+    with pytest.raises(ValueError):
+        sim_core.regrow_patchy(
+            grid, field._capacity[: world.n_cells - 1], temps, mask,
+            2.0, 0.5, 0.5, 1.0,  # capacity 短一格
+        )
+    with pytest.raises(ValueError):
+        sim_core.regrow_patchy(
+            grid, field._capacity, temps, mask[: world.n_cells - 1],
+            2.0, 0.5, 0.5, 1.0,  # mask 短一格
+        )
+
+
 # ---- 3.3 step_vectors：种群数值管线对拍 -----------------------------------
 #
 # Rust 的 stage1/stage2 与 sphere_engine._step_population 的第 1~3、5~8 步

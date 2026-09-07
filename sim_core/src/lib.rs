@@ -77,6 +77,38 @@ fn require_len(name: &str, got: usize, want: usize) -> PyResult<()> {
     Ok(())
 }
 
+/// regrow_patchy：patchy 模式资源再生（L7e，3.2 的斑块化推广）。
+///
+/// 语义与 `ResourceField._regrowth_amount`（distribution="patchy"）逐位等价：
+/// 每格恢复量 = 基准再生率 × 温度因子 × 空间倍率（patch/bg），min 到容量。
+/// `patch_mask` 为 (n_cells,) uint8（1=斑块格），就地更新 `grid`。
+#[pyfunction]
+#[pyo3(name = "regrow_patchy")]  // 导出名 regrow_patchy；内部函数名避免与 mod regrow::regrow_patchy 混淆
+fn regrow_patchy_rs(
+    grid: Bound<'_, PyArray1<f64>>,
+    capacity: PyReadonlyArray1<'_, f64>,
+    temperature: PyReadonlyArray1<'_, f64>,
+    patch_mask: PyReadonlyArray1<'_, u8>,
+    patch_regrowth_mult: f64,
+    bg_regrowth_mult: f64,
+    regrow_rate: f64,
+    temp_sensitivity: f64,
+) -> PyResult<()> {
+    let mut g = unsafe { grid.as_slice_mut()? };
+    let cap = capacity.as_slice()?;
+    let temp = temperature.as_slice()?;
+    let mask = patch_mask.as_slice()?;
+    let n = g.len();
+    require_len("capacity", cap.len(), n)?;
+    require_len("temperature", temp.len(), n)?;
+    require_len("patch_mask", mask.len(), n)?;
+    regrow::regrow_patchy(
+        &mut g, cap, temp, mask, patch_regrowth_mult, bg_regrowth_mult,
+        regrow_rate, temp_sensitivity,
+    );
+    Ok(())
+}
+
 /// consume_many：资源场批量消耗（3.5）。
 ///
 /// 语义与 `ResourceField.consume_many` 逐位等价：按 `flats` 逐只把
@@ -510,6 +542,7 @@ fn step_movement(
 #[pymodule]
 fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(regrow_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(regrow_patchy_rs, m)?)?;
     m.add_function(wrap_pyfunction!(consume_many, m)?)?;
     m.add_function(wrap_pyfunction!(step_vectors_stage1, m)?)?;
     m.add_function(wrap_pyfunction!(step_vectors_stage2, m)?)?;

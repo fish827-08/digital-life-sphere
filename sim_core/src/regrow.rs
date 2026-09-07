@@ -52,6 +52,43 @@ fn clamp01(x: f64) -> f64 {
     }
 }
 
+/// patchy 模式资源再生（L7e）。
+///
+/// 语义与 `ResourceField.regrow` + `_regrowth_amount`（distribution="patchy"）
+/// 逐位等价：每格恢复量 = 基准再生率 × 温度因子 × 空间倍率
+/// （斑块格 × patch_regrowth_mult / 背景格 × bg_regrowth_mult，守恒），
+/// 再 min 到容量。
+/// `patch_mask` 为每格 0/1 标记（u8：1=斑块格）。温度因子同 `regrow`。
+pub fn regrow_patchy(
+    grid: &mut [f64],
+    capacity: &[f64],
+    temperature: &[f64],
+    patch_mask: &[u8],
+    patch_regrowth_mult: f64,
+    bg_regrowth_mult: f64,
+    regrow_rate: f64,
+    temp_sensitivity: f64,
+) {
+    debug_assert_eq!(grid.len(), capacity.len());
+    debug_assert_eq!(grid.len(), temperature.len());
+    debug_assert_eq!(grid.len(), patch_mask.len());
+
+    for i in 0..grid.len() {
+        let factor = clamp01((temperature[i] + 20.0) / 20.0);
+        let factor = if temp_sensitivity == 1.0 {
+            factor
+        } else {
+            factor.powf(temp_sensitivity)
+        };
+        let mult = if patch_mask[i] != 0 {
+            patch_regrowth_mult
+        } else {
+            bg_regrowth_mult
+        };
+        grid[i] = take_min(grid[i] + regrow_rate * factor * mult, capacity[i]);
+    }
+}
+
 /// 与 np.minimum(cap, x) 等价（相等时取 cap，值相同）。
 #[inline]
 fn take_min(x: f64, cap: f64) -> f64 {
@@ -100,5 +137,29 @@ mod tests {
         assert!((out[0] - 0.5).abs() < 1e-12);
         assert!((out[1] - 0.5).abs() < 1e-12);
         assert!((out[2] - 0.32).abs() < 1e-12);
+    }
+
+    #[test]
+    fn patchy_multiplies_per_cell() {
+        // 斑块格 ×2、背景格 ×0.5：同温度下恢复量按倍率缩放
+        let mut grid = vec![0.0, 0.0, 0.0];
+        let cap = vec![40.0, 40.0, 40.0];
+        let temp = vec![30.0, 30.0, 30.0];
+        let mask = vec![1u8, 0u8, 1u8];
+        regrow_patchy(&mut grid, &cap, &temp, &mask, 2.0, 0.5, 0.5, 1.0);
+        assert_eq!(grid, vec![0.5, 0.25, 0.5]); // patch=0.5×2，bg=0.5×0.5
+    }
+
+    #[test]
+    fn patchy_uniform_with_mult1_matches_regrow() {
+        // 倍率都=1 时 patchy 与 regrow 逐位一致（守恒平凡情形）
+        let mut g1 = vec![0.0, 1.5, 3.0];
+        let mut g2 = g1.clone();
+        let cap = vec![40.0, 40.0, 40.0];
+        let temp = vec![30.0, 0.0, -20.0];
+        let mask = vec![1u8, 1u8, 0u8];
+        regrow(&mut g1, &cap, &temp, 0.5, 1.0);
+        regrow_patchy(&mut g2, &cap, &temp, &mask, 1.0, 1.0, 0.5, 1.0);
+        assert_eq!(g1, g2);
     }
 }

@@ -70,3 +70,39 @@ def test_engine_internal_state_bitwise_equal():
         rs_e.resources._grid, py_e.resources._grid,
         err_msg="resources._grid 逐位不相等",
     )
+
+
+# ---- L7e：patchy 模式引擎级双路径对拍 ------------------------------------
+
+def make_patchy_pair(seed):
+    """同 seed 的 patchy 引擎对：Python 再生 vs Rust regrow_patchy。"""
+    py_cfg = small_cfg(seed)
+    rs_cfg = small_cfg(seed)
+    py_cfg.resources.distribution = "patchy"
+    rs_cfg.resources.distribution = "patchy"
+    # 小网格（8×12=96 格）：斑块数/倍率需保守，否则背景容量为负
+    py_cfg.resources.patch_count = 3
+    rs_cfg.resources.patch_count = 3
+    py_cfg.resources.patch_radius = 1
+    rs_cfg.resources.patch_radius = 1
+    py_cfg.resources.patch_capacity_mult = 2.0
+    rs_cfg.resources.patch_capacity_mult = 2.0
+    rs_cfg.simulation.use_sim_core = True
+    return SphereEngine(py_cfg), SphereEngine(rs_cfg)
+
+
+@pytest.mark.parametrize("seed", [3, 7])
+def test_patchy_engine_tickstats_bitwise_equal(seed):
+    """patchy：逐 tick TickStats 逐位相等（Rust regrow_patchy 接入不改变行为）。"""
+    py_e, rs_e = make_patchy_pair(seed)
+    for _ in range(300):
+        s_py = py_e.step()
+        s_rs = rs_e.step()
+        assert s_rs == s_py, (
+            f"tick {s_rs.tick} 不一致: py={s_py} rs={s_rs}"
+        )
+    # 资源网格走的是 Rust regrow_patchy，应逐位一致
+    np.testing.assert_array_equal(
+        rs_e.resources._grid, py_e.resources._grid,
+        err_msg="patchy 下 resources._grid 逐位不相等",
+    )
