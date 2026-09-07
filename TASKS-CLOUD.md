@@ -55,3 +55,62 @@
 
 全部完成后 push `feature/cloud-tasks` 到 gitee/github，并更新 PROGRESS.md；
 由本地统一 review → 合并进 feature/dev-l7（若有冲突，本地解）。
+
+---
+
+# 第二轮云端任务分配单（2026-09-07 dispatch #2）
+
+> 承接方：云端环境（第一轮 C1/C2/C3 已全部完成并合入 feature/dev-l7，e531853 验 136 passed）
+> 分工原则：与本地在跑的 T4（繁殖下沉，仅剩 Python 集成/对拍）改动区域隔离；
+> 本轮三任务各自独立分支独立 commit，完成后 push `feature/cloud-tasks`，由本地 review 合并。
+
+## 一、分配的 3 项任务（预估 8~11h）
+
+| 编号 | 任务 | 预估 | 规格来源 |
+|------|------|------|---------|
+| C4 | A3：敏感性扫描脚本 + 后台低优先级跑核心 4 参数 | 3~5h（含后台跑批） | 隐式选择压审计清单.md §三 |
+| C5 | L10：种子传播（蓄力/释放/传播落点/种子能量）下沉 Rust + 对拍 | 3~4h | L8-L10-扩展特性建议文档.md §L10 |
+| C6 | T5（可选）：L7c slots 预分配模式替代每 tick `np.delete/concat` | 2~3h | TASKS-DEV.md §一 T5 |
+
+## 二、任务要求
+
+### C4 = A3 敏感性扫描（脚本 + 后台跑批）
+
+- 目标：对高影响参数（§三发现的 4 个）做 ±20% / ±50% 扫描（500 代 × 3 seed），
+  标出哪些参数显著改变终局基因分布。
+- 做法：新建 `experiments/sensitivity_scan.py`（复用 `long_run_l4l5.py` 的引擎配置与增量落盘风格）：
+  - 参数维度：`predation.transfer_ratio`（+/-20/50%）、`culture.trust_false`（对称化对照）、
+    社会效价 `+0.2/-0.1`（对称化对照 `±0.15`）、活性保底 `0.4`（→0.0/0.2/0.6）；
+  - 结果落到 `results/sensitivity/<param>_<value>_<seed>/`（termination.csv，字段含终局基因均值/分布）；
+  - 汇总表 `results/sensitivity/summary.csv`：参数→终局基因分布差异。
+- 注意事项：
+  - 跑批用**实验用 `.venv`**（不是 `.venv-dev`），后台低优先级执行；写入必须是**增量落盘**（每代 flush），防中断丢数据；
+  - seed 用 42/2024/777；500 代起步（如单次 >10min 可降至 300 代并在 summary 注明）。
+- 验收：脚本可在两种 venv 下运行；summary.csv 齐 3 seed × 扫描档位；不改变引擎行为（只新增实验脚本）。
+
+### C5 = L10 种子传播下沉（先行版：数值管线）
+
+- 先读 `L8-L10-扩展特性建议文档.md` §L10 确认语义；**若云端侧尚未实现 L10 的 Python 参考实现，
+  可在 Python 侧先实现 L10 参考实现（含蓄力/释放/传播/种子能量），再下沉 Rust，两步都走对拍**。
+- Rust 新增 `sim_core/src/dispersal.rs`，实现种子传播批量管线（分值位运算→落点采样可保留 Python 侧，仅下沉确定性数值段）；
+- 对拍：函数级（同输入同 rand_emit 类随机数组，落点/能量逐位一致）+ 引擎级（use_sim_core=True vs False）+ 全量 pytest。
+- 注意与本地隔离：**不要动 `sim_core/src/l4_l5.rs`、`predation.rs`、`reproduction.rs`**。
+
+### C6 = T5 slots 预分配预研（可选，做不出可回退）
+
+- 目标：评估并（若顺序依赖风险可控）实现用"slot 池"替代每 tick `np.delete/np.concatenate` 的种群数组管理。
+- 产出至少包含一个**评估报告**（`docs/slots-preview.md`）：存活性管理算法、死亡槽复用策略、
+  与 RNG consume 顺序的交互风险点、性能预期（基准：T1~T4 后 N=5000 tick/s）；若结论可行再实现。
+- 验收：评估报告 + （如实现）双路径 1000 tick 对拍 + 全量 pytest。
+
+## 三、环境与分支约定（同第一轮）
+
+1. 分支：`feature/cloud-tasks` 基础上新建 `feature/cloud-tasks-2`，每任务独立 commit（带 C4/C5/C6 编号）。
+2. Rust 工具链/maturin/测试解释器约定同第一轮 §三（.venv-dev 构建，.venv 跑实验）。
+3. 与本地隔离：T4（繁殖下沉）由本地负责，勿动 `reproduction.rs` 与 `sphere_engine.py` 繁殖步骤；
+   A2 参数已定稿（`SimConfig.predation/culture`），勿改其默认值（扫描值由实验脚本传入覆盖）。
+4. 完成每项后更新 PROGRESS.md，commit 信息注明"经验收"。
+
+## 四、返回方式（同第一轮）
+
+push `feature/cloud-tasks-2` 后由本地统一 review → 合并进 feature/dev-l7。
