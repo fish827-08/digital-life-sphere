@@ -41,3 +41,8 @@ sim_core/target/
 long_run_result.txt
 language-path.html
 long_run_l4l5_result.txt
+
+# 快照运行时文件
+snapshot.npz
+long_run_*.csv
+long_run_*.txt
