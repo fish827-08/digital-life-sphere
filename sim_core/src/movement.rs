@@ -1,0 +1,151 @@
+//! 移动决策（L3 g14）Rust 下沉：逐个体计算 8 邻格得分并选择目标。
+//!
+//! 语义与 sphere_engine._step_population 步骤 5 逐位等价：
+//!   - 得分 = 感知×(食物×0.5 + 信号×0.5×信任度) + 群居×密度
+//!          + 工作记忆×0.3×感知 + 解读表×0.4×感知
+//!   - 得分无差异时随机选邻格（rand_choice 预生成）
+//!   - 否则选得分最高的邻格
+//!   - 移动后扣移动耗能（move_cost_ind）
+//!
+//! 优化点：消除逐个体 Python 循环 + np.isin + np.max/min + np.argmax + np.array 等
+//! 大量 numpy 小函数调用开销（N=5000 时占总耗时 50%+）。
+
+/// 移动决策核心函数。
+///
+/// # 参数
+/// - `flat`: (N,) 个体所在格子，就地更新（移动个体的新位置）
+/// - `energy`: (N,) 能量，就地更新（扣移动耗能）
+/// - `genes`: (N, gene_count) 基因（C 连续）
+/// - `trust`: (N,) 信任度
+/// - `work_memory`: (N, 4) 工作记忆（-1 表示空槽）
+/// - `interpret`: (N, 16) 信号解读表
+/// - `food_ratio`: (n_cells,) 每格食物比例
+/// - `sig_present`: (n_cells,) 每格是否有信号（0/1）
+/// - `densities`: (n_cells,) 每格个体密度
+/// - `signal_marks`: (n_cells,) 每格信号标记（0~15，0=无信号）
+/// - `neighbors`: (n_cells * nb_stride,) 展平邻居表
+/// - `move_inds`: (n_move,) 移动个体的索引（Python 侧已筛选 move_mask & energy>cost）
+/// - `rand_choice`: (n_move,) 预生成随机选择（得分无差异时用，% n_valid_nb）
+/// - `move_cost_ind`: (N,) 每个个体的移动耗能
+/// - `n_cells`: 格子总数
+/// - `nb_stride`: 每行邻居数
+/// - `gene_count`: 基因数
+#[allow(clippy::too_many_arguments)]
+pub fn step_movement(
+    flat: &mut [i64],
+    energy: &mut [f64],
+    genes: &[f64],
+    trust: &[f64],
+    work_memory: &[i64],
+    interpret: &[f64],
+    food_ratio: &[f64],
+    sig_present: &[f64],
+    densities: &[f64],
+    signal_marks: &[u8],
+    neighbors: &[i64],
+    move_inds: &[i64],
+    rand_choice: &[i64],
+    move_cost_ind: &[f64],
+    n_cells: usize,
+    nb_stride: usize,
+    gene_count: usize,
+) {
+    let n = flat.len();
+    if n == 0 || move_inds.is_empty() {
+        return;
+    }
+
+    for (k, &idx_i64) in move_inds.iter().enumerate() {
+        let idx = idx_i64 as usize;
+        if idx >= n {
+            continue;
+        }
+        let c = flat[idx] as usize;
+        if c >= n_cells {
+            continue;
+        }
+
+        let perc = genes[idx * gene_count + 14];
+        let soc = (genes[idx * gene_count + 13] - 0.5) * 2.0;
+        let trust_val = trust[idx];
+
+        // 收集有效邻居（>=0），同时计算得分
+        // 极点格最多 cols 个邻居（≤120），用 128 固定数组避免堆分配
+        let mut valid_nb: [i64; 128] = [-1; 128];
+        let mut scores: [f64; 128] = [0.0; 128];
+        let mut n_valid = 0usize;
+
+        let nb_base = c * nb_stride;
+        for nb_off in 0..nb_stride {
+            let nbc = neighbors[nb_base + nb_off];
+            if nbc < 0 {
+                continue;
+            }
+            let nbc = nbc as usize;
+            if nbc >= n_cells {
+                continue;
+            }
+            valid_nb[n_valid] = nbc as i64;
+
+            // 基础得分：感知×(食物×0.5 + 信号×0.5×信任) + 群居×密度
+            let mut s = perc * (food_ratio[nbc] * 0.5 + sig_present[nbc] * 0.5 * trust_val)
+                + soc * densities[nbc];
+
+            // 工作记忆：记忆中的食物格子在邻格中 → 额外加分
+            let wm_base = idx * 4;
+            for w in 0..4 {
+                let mc = work_memory[wm_base + w];
+                if mc >= 0 && mc as usize == nbc {
+                    s += 0.3 * perc;
+                    break;
+                }
+            }
+
+            // 信号解读表：邻格有信号时，个体对该模式的解读影响得分
+            let mark = signal_marks[nbc] as usize;
+            if mark > 0 {
+                let interp_val = interpret[idx * 16 + mark];
+                s += 0.4 * perc * interp_val;
+            }
+
+            scores[n_valid] = s;
+            n_valid += 1;
+        }
+
+        if n_valid == 0 {
+            continue;
+        }
+
+        // 只有一个有效邻居 → 直接选，不消费随机数（与 Python 一致）
+        if n_valid == 1 {
+            flat[idx] = valid_nb[0];
+            energy[idx] -= move_cost_ind[idx];
+            continue;
+        }
+
+        // 选择目标：得分无差异时随机选，否则选最高
+        let mut max_score = scores[0];
+        let mut min_score = scores[0];
+        let mut max_idx = 0usize;
+        for j in 1..n_valid {
+            if scores[j] > max_score {
+                max_score = scores[j];
+                max_idx = j;
+            }
+            if scores[j] < min_score {
+                min_score = scores[j];
+            }
+        }
+
+        let target_idx = if (max_score - min_score) < 1e-9 {
+            // 得分无差异 → 随机选有效邻居
+            (rand_choice[k].rem_euclid(n_valid as i64)) as usize
+        } else {
+            max_idx
+        };
+
+        // 更新位置 + 扣移动耗能
+        flat[idx] = valid_nb[target_idx];
+        energy[idx] -= move_cost_ind[idx];
+    }
+}

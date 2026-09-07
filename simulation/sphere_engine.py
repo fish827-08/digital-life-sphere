@@ -108,7 +108,7 @@ class SphereEngine:
         "_parent", "_id", "_next_id", "_max_generation",
         "_repro_cooldown",
         "_valence", "_arousal", "_expectation", "_baseline", "_trust",
-        "_work_memory", "_mem_ptr", "_interpret",
+        "_work_memory", "_mem_ptr", "_interpret", "_nb_table",
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
@@ -166,6 +166,15 @@ class SphereEngine:
         )
         # 田字格信号场（L2/L3）：生物可写入/读取 16 种标记模式
         self.signals = SignalField(self.world, duration=50)
+
+        # 预计算统一邻居表（L6 Rust 下沉用）：普通格 8 邻，极点格 cols 邻，
+        # 统一到 nb_stride 列，未用位置填 -1。世界不变，只需构建一次。
+        n_cells = self.world.n_cells
+        nb_stride = max(8, self.world.cols)
+        self._nb_table = np.full((n_cells, nb_stride), -1, dtype=np.int64)
+        for c in range(n_cells):
+            nbs = self.world.neighbors(c)
+            self._nb_table[c, :len(nbs)] = nbs
 
         n = config.population.initial_count
         self._flat = np.zeros(n, dtype=np.int64)
@@ -523,94 +532,119 @@ class SphereEngine:
                 patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
                 self.signals.write_many(e_flat, patterns)
 
-        # 5) 移动：raw 抽样在 Python（RNG），能量门槛判定两路径一致（Rust 在 stage2 内）
-        # g19 植物化：扎根倾向高的个体移动概率降低（g0 × (1-g19)）
+        # 5) 移动：g19 植物化降低移动概率（g0 × (1-g19)）
+        #    use_sim_core=True：移动决策下沉到 Rust（step_movement），移动耗能在 Rust 内扣；
+        #    stage2 只做年龄/冷却（moved_raw 全 False，不重复扣移动耗能）。
         move_prob = genes[:, 0] * (1.0 - genes[:, 19])
+        move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, 6])
         if self._use_sim_core:
             moved_raw = self.rng.random(P) < move_prob
-            move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, 6])
+            mi = np.flatnonzero(moved_raw & (energy >= move_cost_ind))
+            # stage2：moved_raw 全 False（移动耗能改由 step_movement 扣），年龄/冷却正常
             out_moved = np.empty(P, dtype=bool)
             out_starved = np.empty(P, dtype=bool)
             out_expired = np.empty(P, dtype=bool)
             out_repro = np.empty(P, dtype=bool)
             self._sim_core.step_vectors_stage2(
                 energy, self._age[:P], self._repro_cooldown[:P], genes,
-                moved_raw, move_cost_ind,
+                np.zeros(P, dtype=bool), move_cost_ind,
                 out_moved, out_starved, out_expired, out_repro,
                 day_len, ocfg.maturity_fraction, ocfg.max_energy,
             )
-            moved = out_moved
+            if len(mi) > 0:
+                # 预计算环境量
+                food_ratio = self.resources._grid / np.maximum(
+                    self.resources._capacity, 1e-9
+                )
+                sig_present = (self.signals._marks > 0).astype(np.float64)
+                densities = np.bincount(
+                    self._flat, minlength=self.world.n_cells
+                ).astype(np.float64)
+                signal_marks = self.signals._marks.astype(np.uint8)
+                # 预生成随机选择（得分无差异时用），按移动个体顺序
+                rand_choice = self.rng.integers(
+                    0, 1_000_000, size=len(mi), dtype=np.int64
+                )
+                # Rust 移动决策（含移动扣费）
+                self._sim_core.step_movement(
+                    self._flat[:P], energy, genes, self._trust[:P],
+                    self._work_memory[:P].reshape(-1), self._interpret[:P],
+                    food_ratio, sig_present, densities, signal_marks,
+                    self._nb_table.reshape(-1),
+                    mi.astype(np.int64), rand_choice, move_cost_ind,
+                    self.world.n_cells, self._nb_table.shape[1],
+                )
+                # 5.6) 信任学习：移动到有信号的格子后验证真假
+                target_cells = self._flat[mi]
+                had_signal = sig_present[target_cells] > 0
+                has_food = food_ratio[target_cells] > 0.3
+                true_sig = had_signal & has_food
+                false_sig = had_signal & ~has_food
+                self._trust[mi[true_sig]] = np.minimum(
+                    1.0, self._trust[mi[true_sig]] + 0.05
+                )
+                self._trust[mi[false_sig]] = np.maximum(
+                    0.0, self._trust[mi[false_sig]] - 0.1
+                )
         else:
             moved = self.rng.random(P) < move_prob
-            move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, 6])
             moved &= energy >= move_cost_ind  # 付得起才走
-        Nm = int(moved.sum())
-        if Nm:
-            mi = np.flatnonzero(moved)
-            # 预计算全格食物归一化与信号存在（循环内查表，避免重复计算）
-            food_ratio = self.resources._grid / np.maximum(
-                self.resources._capacity, 1e-9
-            )
-            sig_present = (self.signals._marks > 0).astype(np.float64)
-            densities = np.bincount(self._flat, minlength=self.world.n_cells).astype(
-                np.float64
-            )
-            targets = np.empty(Nm, dtype=np.int64)
-            for i, idx in enumerate(mi):
-                nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
-                if len(nb) == 1:
-                    targets[i] = nb[0]
-                    continue
-                # g14 感知权重：越高越看重食物和信号
-                perc = genes[idx, 14]
-                # g13 群居权重：>0.5 聚群（正），<0.5 避群（负）
-                soc = (genes[idx, 13] - 0.5) * 2.0
-                # 邻格得分 = 感知×(食物×0.5+信号×0.5×信任度) + 群居×密度
-                # 信任度低的个体忽略信号（被欺骗过），信任度高的个体追随信号
-                score = perc * (
-                    food_ratio[nb] * 0.5 + sig_present[nb] * 0.5 * self._trust[idx]
-                ) + soc * densities[nb]
-                # 工作记忆：记忆中的食物格子在邻格中 → 额外加分
-                mem_cells = self._work_memory[idx]
-                valid_mem = mem_cells[mem_cells >= 0]
-                if len(valid_mem) > 0:
-                    mem_in_nb = np.isin(nb, valid_mem)
-                    score = score + 0.3 * perc * mem_in_nb.astype(np.float64)
-                # 信号解读表（L5 文化）：邻格有信号时，个体对该模式的解读影响得分
-                # 正值=移向（学到这信号代表食物），负值=逃避（学到这信号代表危险）
-                nb_sigs = self.signals._marks[nb]
-                if (nb_sigs > 0).any():
-                    interp = np.array(
-                        [self._interpret[idx, int(s)] if s > 0 else 0.0 for s in nb_sigs],
-                        dtype=np.float64,
-                    )
-                    score = score + 0.4 * perc * interp
-                if score.max() - score.min() < 1e-9:
-                    # 得分无差异 → 随机（保留原有随机行为）
-                    targets[i] = nb[int(self.rng.integers(0, len(nb)))]
-                else:
-                    targets[i] = nb[int(np.argmax(score))]
-            self._flat[mi] = targets
-            if not self._use_sim_core:
-                energy[mi] -= move_cost_ind[mi]  # Rust 路径已在 stage2 内扣除
+            Nm = int(moved.sum())
+            if Nm:
+                mi = np.flatnonzero(moved)
+                food_ratio = self.resources._grid / np.maximum(
+                    self.resources._capacity, 1e-9
+                )
+                sig_present = (self.signals._marks > 0).astype(np.float64)
+                densities = np.bincount(
+                    self._flat, minlength=self.world.n_cells
+                ).astype(np.float64)
+                rand_choice = self.rng.integers(
+                    0, 1_000_000, size=Nm, dtype=np.int64
+                )
+                targets = np.empty(Nm, dtype=np.int64)
+                for i, idx in enumerate(mi):
+                    nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                    if len(nb) == 1:
+                        targets[i] = nb[0]
+                        continue
+                    perc = genes[idx, 14]
+                    soc = (genes[idx, 13] - 0.5) * 2.0
+                    score = perc * (
+                        food_ratio[nb] * 0.5 + sig_present[nb] * 0.5 * self._trust[idx]
+                    ) + soc * densities[nb]
+                    valid_mem = self._work_memory[idx][self._work_memory[idx] >= 0]
+                    if len(valid_mem) > 0:
+                        mem_in_nb = np.isin(nb, valid_mem)
+                        score = score + 0.3 * perc * mem_in_nb.astype(np.float64)
+                    nb_sigs = self.signals._marks[nb]
+                    if (nb_sigs > 0).any():
+                        interp = np.array(
+                            [self._interpret[idx, int(s)] if s > 0 else 0.0 for s in nb_sigs],
+                            dtype=np.float64,
+                        )
+                        score = score + 0.4 * perc * interp
+                    if score.max() - score.min() < 1e-9:
+                        targets[i] = nb[int(rand_choice[i] % len(nb))]
+                    else:
+                        targets[i] = nb[int(np.argmax(score))]
+                self._flat[mi] = targets
+                energy[mi] -= move_cost_ind[mi]
+                # 5.6) 信任学习
+                target_cells = self._flat[mi]
+                had_signal = sig_present[target_cells] > 0
+                has_food = food_ratio[target_cells] > 0.3
+                true_sig = had_signal & has_food
+                false_sig = had_signal & ~has_food
+                self._trust[mi[true_sig]] = np.minimum(
+                    1.0, self._trust[mi[true_sig]] + 0.05
+                )
+                self._trust[mi[false_sig]] = np.maximum(
+                    0.0, self._trust[mi[false_sig]] - 0.1
+                )
 
-            # 5.6) 信任学习（L5）：移动到有信号的格子后验证真假
-            #     真信号（有信号且有食物）→ trust+；假信号（有信号但无食物）→ trust-
-            target_cells = self._flat[mi]
-            had_signal = sig_present[target_cells] > 0
-            has_food = food_ratio[target_cells] > 0.3
-            true_sig = had_signal & has_food
-            false_sig = had_signal & ~has_food
-            self._trust[mi[true_sig]] = np.minimum(
-                1.0, self._trust[mi[true_sig]] + 0.05
-            )
-            self._trust[mi[false_sig]] = np.maximum(
-                0.0, self._trust[mi[false_sig]] - 0.1
-            )
-
-        # 5.5) 捕食（g16）：高攻击基因个体攻击邻格个体，获取能量
-        #     攻击概率 = g16 × 0.2 × 饥饿度（能量越低越可能攻击，避免过度捕食）
-        #     成功率 = 能量比 × 攻击力加成；成功后获得猎物 40% 能量和胃粮
+        # 5.5) 捕食（g16）+ 6.5) 文化学习（L5）：use_sim_core=True 时合并为一次 Rust 调用，
+        #     共用一次 cell→个体 CSR 构建，消除重复开销。use_sim_core=False 时分步执行。
         predation_mask = np.zeros(P, dtype=bool)
         attack_gene = genes[:, 16]
         hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
@@ -618,51 +652,72 @@ class SphereEngine:
         attackers = np.flatnonzero(
             (attack_gene > 0.3) & (self.rng.random(P) < attack_prob)
         )
-        for idx in attackers:
-            if energy[idx] <= 0.1:
-                continue  # 能量不足以攻击
-            nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
-            nb_mask = np.isin(self._flat[:P], nb) & (np.arange(P) != idx)
-            prey_candidates = np.flatnonzero(nb_mask)
-            if len(prey_candidates) == 0:
-                continue
-            prey = int(prey_candidates[int(self.rng.integers(0, len(prey_candidates)))])
-            if predation_mask[prey]:
-                continue  # 已被其他捕食者锁定
-            energy[idx] -= 0.1  # 攻击耗能（无论成败）
-            success_rate = np.clip(
-                (energy[idx] / max(energy[idx] + energy[prey], 1e-9))
-                * (0.5 + attack_gene[idx] * 0.5),
-                0.1, 0.9,
-            )
-            if self.rng.random() < success_rate:
-                predation_mask[prey] = True
-                energy[idx] += energy[prey] * 0.4
-                stomach[idx] = np.minimum(
-                    stomach[idx] + stomach[prey] * 0.4,
-                    ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
-                )
-                stomach[prey] = 0.0
-
-        # 6) 年龄推进（Rust 路径已由 stage2 就地 +1）
-        if not self._use_sim_core:
-            self._age[:P] += 1
-
-        # 6.5) 文化学习（L5）：幼体向周围成体学习信号解读表（Kirby 迭代学习）
+        # 文化学习需要的成熟年龄（年龄已在 stage2 推进，use_sim_core=True 时）
         age_f = self._age[:P].astype(np.float64)
         life_span = self._lifespan(genes[:, 3])
         maturity_age = ocfg.maturity_fraction * life_span
-        juvenile = age_f < maturity_age
-        if juvenile.any():
-            j_idx = np.flatnonzero(juvenile)
-            for idx in j_idx:
-                nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
-                nb_mask = np.isin(self._flat[:P], nb)
-                adult_nb = nb_mask & (age_f >= maturity_age)
-                adult_idx = np.flatnonzero(adult_nb)
-                if len(adult_idx) > 0:
-                    mean_interpret = self._interpret[adult_idx].mean(axis=0)
-                    self._interpret[idx] += 0.1 * (mean_interpret - self._interpret[idx])
+
+        if self._use_sim_core:
+            # 合并调用：捕食 + 文化学习，共用一次 CSR
+            if len(attackers) > 0:
+                rand_prey = self.rng.integers(0, 1_000_000, size=len(attackers), dtype=np.int64)
+                rand_success = self.rng.random(len(attackers))
+            else:
+                rand_prey = np.zeros(0, dtype=np.int64)
+                rand_success = np.zeros(0, dtype=np.float64)
+            self._sim_core.predation_and_culture(
+                energy, stomach, predation_mask, self._interpret,
+                self._flat[:P], genes, self._age[:P], maturity_age,
+                attackers.astype(np.int64), rand_prey, rand_success,
+                self._nb_table.reshape(-1),
+                self.world.n_cells, self._nb_table.shape[1],
+                ocfg.max_energy, ocfg.eat_efficiency, 0.1,
+            )
+        else:
+            # ── Python 分步：捕食 ──
+            if len(attackers) > 0:
+                rand_prey = self.rng.integers(0, 1_000_000, size=len(attackers), dtype=np.int64)
+                rand_success = self.rng.random(len(attackers))
+                for k, idx in enumerate(attackers):
+                    if energy[idx] <= 0.1:
+                        continue
+                    nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                    nb_mask = np.isin(self._flat[:P], nb) & (np.arange(P) != idx)
+                    prey_candidates = np.flatnonzero(nb_mask)
+                    if len(prey_candidates) == 0:
+                        continue
+                    prey = int(prey_candidates[int(rand_prey[k] % len(prey_candidates))])
+                    if predation_mask[prey]:
+                        continue
+                    energy[idx] -= 0.1
+                    success_rate = np.clip(
+                        (energy[idx] / max(energy[idx] + energy[prey], 1e-9))
+                        * (0.5 + attack_gene[idx] * 0.5),
+                        0.1, 0.9,
+                    )
+                    if rand_success[k] < success_rate:
+                        predation_mask[prey] = True
+                        energy[idx] += energy[prey] * 0.4
+                        stomach[idx] = np.minimum(
+                            stomach[idx] + stomach[prey] * 0.4,
+                            ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
+                        )
+                        stomach[prey] = 0.0
+            # ── Python 分步：年龄推进（Rust 路径已由 stage2 就地 +1）──
+            self._age[:P] += 1
+            age_f = self._age[:P].astype(np.float64)
+            # ── Python 分步：文化学习 ──
+            juvenile = age_f < maturity_age
+            if juvenile.any():
+                j_idx = np.flatnonzero(juvenile)
+                for idx in j_idx:
+                    nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                    nb_mask = np.isin(self._flat[:P], nb)
+                    adult_nb = nb_mask & (age_f >= maturity_age)
+                    adult_idx = np.flatnonzero(adult_nb)
+                    if len(adult_idx) > 0:
+                        mean_interpret = self._interpret[adult_idx].mean(axis=0)
+                        self._interpret[idx] += 0.1 * (mean_interpret - self._interpret[idx])
 
         # 7) 死亡判定：饿死（energy<=0）→ 老死（age>=寿命）→ 被捕食
         # 注意：统一用 Python 计算（不用 Rust 的 out_starved/out_expired），

@@ -19,7 +19,7 @@ def small_cfg(seed):
     c.world.rows = 8
     c.world.cols = 12
     c.light.rotation_period = 600          # 昼夜短 → 成熟/老死在小 tick 数内出现
-    c.population.initial_count = 40
+    c.population.initial_count = 60
     c.simulation.ticks = 300
     return c
 

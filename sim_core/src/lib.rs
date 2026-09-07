@@ -15,10 +15,14 @@
 //! （不依赖 pyo3，可独立单测）；本文件只做 pyo3 绑定层（切片 ↔ numpy 数组）。
 //! 温度/光照等环境量目前仍由 Python 侧计算后传入。
 mod consume;
+mod culture;
+mod l4_l5;
+mod movement;
+mod predation;
 mod regrow;
 mod step_vectors;
 
-use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
 /// regrow：资源场再生（3.2）。
@@ -201,11 +205,296 @@ fn step_vectors_stage2(
     Ok(())
 }
 
+/// culture_learn：文化学习（L5），幼体向邻格成体学习信号解读表。
+///
+/// 语义与 sphere_engine 步骤 6.5 逐位等价。interpret (N,16) 就地更新。
+/// neighbors 是展平的 (n_cells*8,) 邻居表（普通格 8 邻，极点格可能含重复/负值）。
+#[pyfunction]
+fn culture_learn(
+    interpret: Bound<'_, PyArray2<f64>>,
+    flat: PyReadonlyArray1<'_, i64>,
+    age: PyReadonlyArray1<'_, i64>,
+    maturity_age: PyReadonlyArray1<'_, f64>,
+    neighbors: PyReadonlyArray1<'_, i64>,
+    n_cells: usize,
+    nb_stride: usize,
+    alpha: f64,
+) -> PyResult<()> {
+    let n = flat.as_array().len();
+    require_len("age", age.as_array().len(), n)?;
+    require_len("maturity_age", maturity_age.as_array().len(), n)?;
+
+    let interp_arr = unsafe { interpret.as_array() };
+    let sh = interp_arr.shape();
+    if sh[0] != n || sh[1] != 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "interpret: 形状 ({}, {}) 应为 ({}, 16)",
+            sh[0], sh[1], n
+        )));
+    }
+
+    // neighbors 长度应为 n_cells * nb_stride
+    let nb_len = neighbors.as_array().len();
+    if nb_len != n_cells * nb_stride {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "neighbors: 长度 {} 应为 n_cells*nb_stride = {}",
+            nb_len,
+            n_cells * nb_stride
+        )));
+    }
+
+    let mut interp = unsafe { interpret.as_slice_mut()? };
+    culture::culture_learn(
+        &mut interp,
+        flat.as_slice()?,
+        age.as_slice()?,
+        maturity_age.as_slice()?,
+        neighbors.as_slice()?,
+        n_cells,
+        nb_stride,
+        alpha,
+    );
+    Ok(())
+}
+
+/// predation_attack：捕食（L4），饥饿驱动攻击邻格猎物。
+///
+/// 语义与 sphere_engine 步骤 5.5 逐位等价。energy/stomach/predation_mask 就地更新。
+/// attack_mask 由 Python 侧按攻击概率+能量门槛筛选；rand_prey/rand_success 由
+/// Python 侧预生成，保证 RNG 消费顺序与 Python 实现一致。
+#[pyfunction]
+fn predation_attack(
+    energy: Bound<'_, PyArray1<f64>>,
+    stomach: Bound<'_, PyArray1<f64>>,
+    predation_mask: Bound<'_, PyArray1<bool>>,
+    flat: PyReadonlyArray1<'_, i64>,
+    genes: PyReadonlyArray2<'_, f64>,
+    attackers: PyReadonlyArray1<'_, i64>,
+    rand_prey: PyReadonlyArray1<'_, i64>,
+    rand_success: PyReadonlyArray1<'_, f64>,
+    neighbors: PyReadonlyArray1<'_, i64>,
+    n_cells: usize,
+    nb_stride: usize,
+    max_energy: f64,
+    eat_efficiency: f64,
+) -> PyResult<()> {
+    let n = flat.as_array().len();
+    require_len("energy", unsafe { energy.as_array().len() }, n)?;
+    require_len("stomach", unsafe { stomach.as_array().len() }, n)?;
+    require_len("predation_mask", unsafe { predation_mask.as_array().len() }, n)?;
+    let n_att = attackers.as_array().len();
+    require_len("rand_prey", rand_prey.as_array().len(), n_att)?;
+    require_len("rand_success", rand_success.as_array().len(), n_att)?;
+
+    let g_arr = genes.as_array();
+    let sh = g_arr.shape();
+    let (n_rows, gene_count) = (sh[0], sh[1]);
+    if n_rows != n || gene_count <= 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "genes: 形状 ({n_rows}, {gene_count}) 与个体数 {n} 不符（需含 g16）"
+        )));
+    }
+    let g_slice = g_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("genes: 需要 C 连续（行主序）数组")
+    })?;
+
+    let nb_len = neighbors.as_array().len();
+    if nb_len != n_cells * nb_stride {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "neighbors: 长度 {nb_len} 应为 n_cells*nb_stride = {}",
+            n_cells * nb_stride
+        )));
+    }
+
+    let mut e = unsafe { energy.as_slice_mut()? };
+    let mut s = unsafe { stomach.as_slice_mut()? };
+    let mut pm = unsafe { predation_mask.as_slice_mut()? };
+
+    predation::predation_attack(
+        &mut e, &mut s, &mut pm,
+        flat.as_slice()?, g_slice,
+        attackers.as_slice()?,
+        rand_prey.as_slice()?,
+        rand_success.as_slice()?,
+        neighbors.as_slice()?,
+        n_cells, nb_stride, gene_count, max_energy, eat_efficiency,
+    );
+    Ok(())
+}
+
+/// predation_and_culture：捕食（L4）+ 文化学习（L5）合并，共用一次 CSR 构建。
+///
+/// 语义与引擎步骤 5.5 + 6.5 逐位等价。每 tick 只构建一次 cell→个体 CSR，
+/// 消除单独下沉时两次构建的重复开销。energy/stomach/predation_mask/interpret 就地更新。
+#[pyfunction]
+fn predation_and_culture(
+    energy: Bound<'_, PyArray1<f64>>,
+    stomach: Bound<'_, PyArray1<f64>>,
+    predation_mask: Bound<'_, PyArray1<bool>>,
+    interpret: Bound<'_, PyArray2<f64>>,
+    flat: PyReadonlyArray1<'_, i64>,
+    genes: PyReadonlyArray2<'_, f64>,
+    age: PyReadonlyArray1<'_, i64>,
+    maturity_age: PyReadonlyArray1<'_, f64>,
+    attackers: PyReadonlyArray1<'_, i64>,
+    rand_prey: PyReadonlyArray1<'_, i64>,
+    rand_success: PyReadonlyArray1<'_, f64>,
+    neighbors: PyReadonlyArray1<'_, i64>,
+    n_cells: usize,
+    nb_stride: usize,
+    max_energy: f64,
+    eat_efficiency: f64,
+    culture_alpha: f64,
+) -> PyResult<()> {
+    let n = flat.as_array().len();
+    require_len("energy", unsafe { energy.as_array().len() }, n)?;
+    require_len("stomach", unsafe { stomach.as_array().len() }, n)?;
+    require_len("predation_mask", unsafe { predation_mask.as_array().len() }, n)?;
+    require_len("age", age.as_array().len(), n)?;
+    require_len("maturity_age", maturity_age.as_array().len(), n)?;
+    let n_att = attackers.as_array().len();
+    require_len("rand_prey", rand_prey.as_array().len(), n_att)?;
+    require_len("rand_success", rand_success.as_array().len(), n_att)?;
+
+    let g_arr = genes.as_array();
+    let sh = g_arr.shape();
+    let (n_rows, gene_count) = (sh[0], sh[1]);
+    if n_rows != n || gene_count <= 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "genes: 形状 ({n_rows}, {gene_count}) 与个体数 {n} 不符（需含 g16）"
+        )));
+    }
+    let g_slice = g_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("genes: 需要 C 连续（行主序）数组")
+    })?;
+
+    let interp_arr = unsafe { interpret.as_array() };
+    let ish = interp_arr.shape();
+    if ish[0] != n || ish[1] != 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "interpret: 形状 ({}, {}) 应为 ({}, 16)", ish[0], ish[1], n
+        )));
+    }
+
+    let nb_len = neighbors.as_array().len();
+    if nb_len != n_cells * nb_stride {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "neighbors: 长度 {nb_len} 应为 n_cells*nb_stride = {}",
+            n_cells * nb_stride
+        )));
+    }
+
+    let mut e = unsafe { energy.as_slice_mut()? };
+    let mut s = unsafe { stomach.as_slice_mut()? };
+    let mut pm = unsafe { predation_mask.as_slice_mut()? };
+    let mut interp = unsafe { interpret.as_slice_mut()? };
+
+    l4_l5::predation_and_culture(
+        &mut e, &mut s, &mut pm, &mut interp,
+        flat.as_slice()?, g_slice,
+        age.as_slice()?, maturity_age.as_slice()?,
+        attackers.as_slice()?,
+        rand_prey.as_slice()?,
+        rand_success.as_slice()?,
+        neighbors.as_slice()?,
+        n_cells, nb_stride, gene_count,
+        max_energy, eat_efficiency, culture_alpha,
+    );
+    Ok(())
+}
+
+/// step_movement：移动决策（L3 g14），逐个体计算邻格得分并选择目标。
+///
+/// 语义与引擎步骤 5 逐位等价。flat/energy 就地更新。
+/// move_inds 是移动个体索引（Python 侧已筛选 move_mask & energy>cost）；
+/// rand_choice 是预生成随机选择（得分无差异时用），保证 RNG 消费顺序一致。
+#[pyfunction]
+fn step_movement(
+    flat: Bound<'_, PyArray1<i64>>,
+    energy: Bound<'_, PyArray1<f64>>,
+    genes: PyReadonlyArray2<'_, f64>,
+    trust: PyReadonlyArray1<'_, f64>,
+    work_memory: PyReadonlyArray1<'_, i64>,
+    interpret: PyReadonlyArray2<'_, f64>,
+    food_ratio: PyReadonlyArray1<'_, f64>,
+    sig_present: PyReadonlyArray1<'_, f64>,
+    densities: PyReadonlyArray1<'_, f64>,
+    signal_marks: PyReadonlyArray1<'_, u8>,
+    neighbors: PyReadonlyArray1<'_, i64>,
+    move_inds: PyReadonlyArray1<'_, i64>,
+    rand_choice: PyReadonlyArray1<'_, i64>,
+    move_cost_ind: PyReadonlyArray1<'_, f64>,
+    n_cells: usize,
+    nb_stride: usize,
+) -> PyResult<()> {
+    let n = unsafe { flat.as_array().len() };
+    require_len("energy", unsafe { energy.as_array().len() }, n)?;
+    require_len("trust", trust.as_array().len(), n)?;
+    require_len("work_memory", work_memory.as_array().len(), n * 4)?;
+    require_len("move_cost_ind", move_cost_ind.as_array().len(), n)?;
+    let n_move = move_inds.as_array().len();
+    require_len("rand_choice", rand_choice.as_array().len(), n_move)?;
+    require_len("food_ratio", food_ratio.as_array().len(), n_cells)?;
+    require_len("sig_present", sig_present.as_array().len(), n_cells)?;
+    require_len("densities", densities.as_array().len(), n_cells)?;
+    require_len("signal_marks", signal_marks.as_array().len(), n_cells)?;
+
+    let g_arr = genes.as_array();
+    let sh = g_arr.shape();
+    let (n_rows, gene_count) = (sh[0], sh[1]);
+    if n_rows != n || gene_count <= 14 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "genes: 形状 ({n_rows}, {gene_count}) 与个体数 {n} 不符（需含 g14）"
+        )));
+    }
+    let g_slice = g_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("genes: 需要 C 连续（行主序）数组")
+    })?;
+
+    let interp_arr = interpret.as_array();
+    let ish = interp_arr.shape();
+    if ish[0] != n || ish[1] != 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "interpret: 形状 ({}, {}) 应为 ({}, 16)", ish[0], ish[1], n
+        )));
+    }
+    let interp_slice = interp_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("interpret: 需要 C 连续（行主序）数组")
+    })?;
+
+    let nb_len = neighbors.as_array().len();
+    if nb_len != n_cells * nb_stride {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "neighbors: 长度 {nb_len} 应为 n_cells*nb_stride = {}",
+            n_cells * nb_stride
+        )));
+    }
+
+    let mut f = unsafe { flat.as_slice_mut()? };
+    let mut e = unsafe { energy.as_slice_mut()? };
+
+    movement::step_movement(
+        &mut f, &mut e, g_slice,
+        trust.as_slice()?, work_memory.as_slice()?, interp_slice,
+        food_ratio.as_slice()?, sig_present.as_slice()?, densities.as_slice()?,
+        signal_marks.as_slice()?,
+        neighbors.as_slice()?,
+        move_inds.as_slice()?, rand_choice.as_slice()?,
+        move_cost_ind.as_slice()?,
+        n_cells, nb_stride, gene_count,
+    );
+    Ok(())
+}
+
 #[pymodule]
 fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(regrow_rs, m)?)?;
     m.add_function(wrap_pyfunction!(consume_many, m)?)?;
     m.add_function(wrap_pyfunction!(step_vectors_stage1, m)?)?;
     m.add_function(wrap_pyfunction!(step_vectors_stage2, m)?)?;
+    m.add_function(wrap_pyfunction!(culture_learn, m)?)?;
+    m.add_function(wrap_pyfunction!(predation_attack, m)?)?;
+    m.add_function(wrap_pyfunction!(predation_and_culture, m)?)?;
+    m.add_function(wrap_pyfunction!(step_movement, m)?)?;
     Ok(())
 }
