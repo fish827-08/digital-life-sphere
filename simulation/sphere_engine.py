@@ -804,23 +804,74 @@ class SphereEngine:
         born = 0
         if K > 0:
             ri = np.flatnonzero(repro)[:K]
-            child_genes = self._genes[ri].copy()
-            mut = self.rng.random((K, gcfg.gene_count)) < gcfg.mutation_rate
-            if mut.any():
-                sigma = gcfg.mutation_sigma * (gcfg.gene_max - gcfg.gene_min)
-                noise = self.rng.normal(0.0, sigma, size=(K, gcfg.gene_count))
-                child_genes = np.clip(
-                    child_genes + np.where(mut, noise, 0.0),
-                    gcfg.gene_min, gcfg.gene_max,
+            if self._use_sim_core:
+                # ---- Rust 路径（T4 L7b）：reproduce_batch 一次性算完基因/能量/文化继承 ----
+                # RNG 顺序必须与 Python 参考路径逐位一致：
+                #   1) mut_mask = random < rate；2) (若任一变异) gene_noise = normal；
+                #   3) exp_noise = normal(inheritance_noise)；4) interp_noise = normal(0.1)
+                mut_mask = (
+                    self.rng.random((K, gcfg.gene_count)) < gcfg.mutation_rate
+                ).astype(np.uint8)
+                gene_noise = np.zeros((K, gcfg.gene_count), dtype=np.float64)
+                if mut_mask.any():
+                    sigma = gcfg.mutation_sigma * (gcfg.gene_max - gcfg.gene_min)
+                    gene_noise = self.rng.normal(
+                        0.0, sigma, size=(K, gcfg.gene_count)
+                    )
+                pcfg = self.config.pleasure
+                exp_noise = self.rng.normal(
+                    0.0, pcfg.inheritance_noise, size=(K, 120)
                 )
-            # 传代投入比例（g7）：亲代把多少比例的能量/胃粮分给子代（0.3~0.7）
-            split = 0.3 + genes[ri, Gene.PARENTAL_INVEST] * 0.4
-            child_energy = energy[ri] * split
-            child_stomach = stomach[ri] * split
-            energy[ri] -= child_energy
-            stomach[ri] -= child_stomach
-            # 生完进入冷却（g12）：间隔 = g12 × 60 tick，冷却没到攒再多也不生
-            self._repro_cooldown[ri] = genes[ri, Gene.REPRO_COOLDOWN] * 60.0
+                interp_noise = self.rng.normal(0.0, 0.1, size=(K, 16))
+                child_genes = np.empty((K, gcfg.gene_count), dtype=np.float64)
+                child_energy = np.empty(K, dtype=np.float64)
+                child_stomach = np.empty(K, dtype=np.float64)
+                child_exp = np.empty((K, 120), dtype=np.float64)
+                child_interp = np.empty((K, 16), dtype=np.float64)
+                child_trust = np.empty(K, dtype=np.float64)
+                child_baseline = np.empty(K, dtype=np.float64)
+                self._sim_core.reproduce_batch(
+                    ri.astype(np.int64),
+                    self._genes[:P], energy, stomach, self._repro_cooldown[:P],
+                    self._expectation[:P], self._interpret[:P],
+                    self._trust[:P], self._baseline[:P],
+                    mut_mask, gene_noise, exp_noise, interp_noise,
+                    child_genes, child_energy, child_stomach,
+                    child_exp, child_interp, child_trust, child_baseline,
+                    gcfg.gene_min, gcfg.gene_max, pcfg.max_reward, 60.0,
+                )
+            else:
+                # ---- Python 参考路径 ----
+                child_genes = self._genes[ri].copy()
+                mut = self.rng.random((K, gcfg.gene_count)) < gcfg.mutation_rate
+                if mut.any():
+                    sigma = gcfg.mutation_sigma * (gcfg.gene_max - gcfg.gene_min)
+                    noise = self.rng.normal(0.0, sigma, size=(K, gcfg.gene_count))
+                    child_genes = np.clip(
+                        child_genes + np.where(mut, noise, 0.0),
+                        gcfg.gene_min, gcfg.gene_max,
+                    )
+                # 传代投入比例（g7）：亲代把多少比例的能量/胃粮分给子代（0.3~0.7）
+                split = 0.3 + genes[ri, Gene.PARENTAL_INVEST] * 0.4
+                child_energy = energy[ri] * split
+                child_stomach = stomach[ri] * split
+                energy[ri] -= child_energy
+                stomach[ri] -= child_stomach
+                # 生完进入冷却（g12）：间隔 = g12 × 60 tick，冷却没到攒再多也不生
+                self._repro_cooldown[ri] = genes[ri, Gene.REPRO_COOLDOWN] * 60.0
+                # 愉悦度：子代继承亲代 expectation + 噪声（文化传递载体）
+                pcfg = self.config.pleasure
+                child_exp = self._expectation[ri].copy()
+                child_exp += self.rng.normal(
+                    0.0, pcfg.inheritance_noise, size=child_exp.shape
+                )
+                child_exp = np.clip(child_exp, 0.0, pcfg.max_reward)
+                # 信任度：子代半继承亲代，回归中性 0.5
+                child_trust = self._trust[ri] * 0.8 + 0.5 * 0.2
+                child_baseline = self._baseline[ri] * 0.5
+                # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体）
+                child_interp = self._interpret[ri].copy()
+                child_interp += self.rng.normal(0.0, 0.1, size=child_interp.shape)
 
             ids = np.arange(self._next_id, self._next_id + K, dtype=np.int64)
             self._next_id += K
@@ -836,13 +887,6 @@ class SphereEngine:
             new_gen = self._generation[ri] + 1
             self._generation = np.concatenate([self._generation, new_gen])
             self._parent = np.concatenate([self._parent, self._id[ri]])
-            # 愉悦度：子代继承亲代 expectation + 噪声（文化传递载体）
-            pcfg = self.config.pleasure
-            child_exp = self._expectation[ri].copy()
-            child_exp += self.rng.normal(
-                0.0, pcfg.inheritance_noise, size=child_exp.shape
-            )
-            child_exp = np.clip(child_exp, 0.0, pcfg.max_reward)
             self._expectation = np.concatenate([self._expectation, child_exp])
             self._valence = np.concatenate(
                 [self._valence, np.zeros(K, dtype=np.float64)]
@@ -850,19 +894,13 @@ class SphereEngine:
             self._arousal = np.concatenate(
                 [self._arousal, np.full(K, 0.5, dtype=np.float64)]
             )
-            self._baseline = np.concatenate(
-                [self._baseline, self._baseline[ri] * 0.5]
-            )
-            # 信任度：子代半继承亲代，回归中性 0.5
-            child_trust = self._trust[ri] * 0.8 + 0.5 * 0.2
+            self._baseline = np.concatenate([self._baseline, child_baseline])
             self._trust = np.concatenate([self._trust, child_trust])
             # 工作记忆：子代继承亲代的食物位置记忆（文化传递的一部分）
             self._work_memory = np.concatenate(
                 [self._work_memory, self._work_memory[ri].copy()]
             )
-            # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体）
-            child_interp = self._interpret[ri].copy()
-            child_interp += self.rng.normal(0.0, 0.1, size=child_interp.shape)
+            # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体，Rust 路径已算好）
             self._interpret = np.concatenate([self._interpret, child_interp])
             born = K
             new_max = int(self._generation.max())
