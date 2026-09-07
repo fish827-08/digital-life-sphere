@@ -934,6 +934,21 @@ class SphereEngine:
         flat = self._flat[:P]
         energy_now = self._energy[:P]
 
+        if self._use_sim_core:
+            # L7a C2：愉悦度更新下沉 Rust，双路径逐位一致
+            densities = np.bincount(flat, minlength=self.world.n_cells).astype(np.float64)
+            self._sim_core.pleasure_update(
+                flat, energy_now, energy_before,
+                densities, self.resources._grid, self.resources._capacity,
+                self.signals._marks,
+                self._valence[:P], self._arousal[:P],
+                self._expectation[:P].reshape(-1), self._baseline[:P],
+                max_e, pcfg.alpha, pcfg.valence_decay, pcfg.arousal_decay,
+                pcfg.baseline_rate, pcfg.max_reward,
+                pcfg.w_energy, pcfg.w_info, pcfg.w_social,
+            )
+            return
+
         # 1) 情境编码
         # 能量档：energy/max_energy → 0~4
         e_bin = np.clip((energy_now / max_e) * 5, 0, 4).astype(np.int64)

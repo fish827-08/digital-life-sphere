@@ -19,6 +19,7 @@ mod culture;
 mod genes;
 mod l4_l5;
 mod movement;
+mod pleasure;
 mod predation;
 mod regrow;
 mod signal;
@@ -583,6 +584,62 @@ fn signal_emit(
     Ok(n_emit)
 }
 
+/// pleasure_update：愉悦度批量更新（L2 RPE 预测误差驱动），L7a C2 下沉。
+///
+/// 语义与 sphere_engine._update_pleasure 逐位等价。
+/// valence/arousal/expectation/baseline 就地更新。expectation 为 (N,120) 展平。
+/// energy_before 由 Python 侧在 tick 开始时保存（步骤 1 前）。
+#[pyfunction]
+fn pleasure_update(
+    flat: PyReadonlyArray1<'_, i64>,
+    energy_now: PyReadonlyArray1<'_, f64>,
+    energy_before: PyReadonlyArray1<'_, f64>,
+    densities: PyReadonlyArray1<'_, f64>,
+    resource_grid: PyReadonlyArray1<'_, f64>,
+    resource_capacity: PyReadonlyArray1<'_, f64>,
+    signal_marks: PyReadonlyArray1<'_, u8>,
+    valence: Bound<'_, PyArray1<f64>>,
+    arousal: Bound<'_, PyArray1<f64>>,
+    expectation: Bound<'_, PyArray1<f64>>,
+    baseline: Bound<'_, PyArray1<f64>>,
+    max_energy: f64,
+    alpha: f64,
+    valence_decay: f64,
+    arousal_decay: f64,
+    baseline_rate: f64,
+    max_reward: f64,
+    w_energy: f64,
+    w_info: f64,
+    w_social: f64,
+) -> PyResult<()> {
+    let n = flat.as_array().len();
+    require_len("energy_now", energy_now.as_array().len(), n)?;
+    require_len("energy_before", energy_before.as_array().len(), n)?;
+    require_len("valence", unsafe { valence.as_array().len() }, n)?;
+    require_len("arousal", unsafe { arousal.as_array().len() }, n)?;
+    require_len("baseline", unsafe { baseline.as_array().len() }, n)?;
+    require_len("expectation", unsafe { expectation.as_array().len() }, n * 120)?;
+    let n_cells = densities.as_array().len();
+    require_len("resource_grid", resource_grid.as_array().len(), n_cells)?;
+    require_len("resource_capacity", resource_capacity.as_array().len(), n_cells)?;
+    require_len("signal_marks", signal_marks.as_array().len(), n_cells)?;
+
+    let mut v = unsafe { valence.as_slice_mut()? };
+    let mut a = unsafe { arousal.as_slice_mut()? };
+    let mut exp = unsafe { expectation.as_slice_mut()? };
+    let mut bl = unsafe { baseline.as_slice_mut()? };
+
+    pleasure::pleasure_update_batch(
+        flat.as_slice()?, energy_now.as_slice()?, energy_before.as_slice()?,
+        densities.as_slice()?, resource_grid.as_slice()?, resource_capacity.as_slice()?,
+        signal_marks.as_slice()?,
+        &mut v, &mut a, &mut exp, &mut bl,
+        max_energy, alpha, valence_decay, arousal_decay, baseline_rate, max_reward,
+        w_energy, w_info, w_social,
+    );
+    Ok(())
+}
+
 #[pymodule]
 fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(regrow_rs, m)?)?;
@@ -595,6 +652,7 @@ fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(predation_and_culture, m)?)?;
     m.add_function(wrap_pyfunction!(step_movement, m)?)?;
     m.add_function(wrap_pyfunction!(signal_emit, m)?)?;
+    m.add_function(wrap_pyfunction!(pleasure_update, m)?)?;
     m.add_function(wrap_pyfunction!(native_gene_indicators, m)?)?;
     Ok(())
 }
