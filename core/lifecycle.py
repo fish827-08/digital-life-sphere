@@ -24,3 +24,4 @@ class DeathCause(Enum):
 
     STARVATION = "starvation"  # 饿死：能量 ≤ 0
     OLD_AGE = "old_age"        # 老死：年龄 ≥ 寿命（基因 g3 决定）
+    PREDATION = "predation"    # 被捕食：被其他个体攻击致死（L4）

@@ -107,7 +107,8 @@ class SphereEngine:
         "_flat", "_energy", "_stomach", "_genes", "_age", "_generation",
         "_parent", "_id", "_next_id", "_max_generation",
         "_repro_cooldown",
-        "_valence", "_arousal", "_expectation", "_baseline",
+        "_valence", "_arousal", "_expectation", "_baseline", "_trust",
+        "_work_memory", "_mem_ptr", "_interpret",
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
@@ -194,6 +195,14 @@ class SphereEngine:
         self._valence = np.zeros(n, dtype=np.float64)
         self._arousal = np.full(n, 0.5, dtype=np.float64)
         self._baseline = np.zeros(n, dtype=np.float64)
+        # 信任度（L5）：对信号的信任，初始 0.5（中性），真信号+假信号-
+        self._trust = np.full(n, 0.5, dtype=np.float64)
+        # 工作记忆（L5）：4 槽，存食物丰富格子位置（-1=空），round-robin 写入
+        self._work_memory = np.full((n, 4), -1, dtype=np.int64)
+        self._mem_ptr = 0
+        # 信号解读表（L5 文化传递）：(N,16)，对 16 种信号模式的响应倾向
+        # 正值=移向，负值=逃避，0=忽略；初始随机，幼体向周围成体学习
+        self._interpret = self.rng.normal(0.0, 0.3, size=(n, 16))
         # 乐观初始化：0.8 × max_reward，逼生物探索（预期高→现实可能超预期→愉悦）
         self._expectation = np.full(
             (n, pcfg.expectation_size),
@@ -395,7 +404,7 @@ class SphereEngine:
         else:
             # 1) 光合收入（g8）：少量、随光照。
             #    收入 = 光照(所在格,当前tick) × g8 × photo_max。
-            #    赤道正午最多 ≈ photo_max(0.1)，寒侧/极地 ≈ 0 —— 与代谢 0.6 相比明显偏少。
+            #    植物化增强（g19）在 stage1 之后统一补，确保双路径一致。
             energy += (
                 self.light.illumination(self._flat, self._tick)
                 * genes[:, 8]
@@ -426,6 +435,15 @@ class SphereEngine:
             energy -= ocfg.base_metabolism * metab_mult * age_mult
             #    + 恒温维持费（g9）：恒温个体每 tick 另付 homeo_upkeep
             energy -= ocfg.homeo_upkeep * homeo
+
+        # 3.5) 植物化光合增强（g19）：统一在 stage1 之后补，确保 Rust/Python 双路径一致
+        #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入
+        energy += (
+            self.light.illumination(self._flat, self._tick)
+            * genes[:, 8]
+            * genes[:, 19]
+            * ocfg.photo_max
+        )
 
         # 4) 进食：从格子里吃进胃（先吃后扣基础维持，保证当天能吃到）
         #    饱食度：胃容量上限（基础 = max_energy/eat_efficiency/2，g5 缩放 0.5~2 倍）
@@ -469,12 +487,24 @@ class SphereEngine:
                     taken2 = self.resources.consume_many(targets, short[hf])
                 stomach[hf] += taken2
 
+        # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）
+        cur_flat = self._flat[:P]
+        food_rich = (
+            self.resources._grid[cur_flat]
+            > 0.5 * self.resources._capacity[cur_flat]
+        )
+        if food_rich.any():
+            rich_idx = np.flatnonzero(food_rich)
+            ptr = int(self._mem_ptr)
+            self._work_memory[rich_idx, ptr] = cur_flat[rich_idx]
+            self._mem_ptr = (ptr + 1) % 4
+
         # 4.5) 信号发射（g15）：以基因概率在当前格写入田字格标记，耗能
         #     模式 = 状态哈希（能量2位 + 食物1位 + 邻居1位 = 4位=16种）
         signal_gene = genes[:, 15]
         emitters = np.flatnonzero(self.rng.random(P) < signal_gene)
         if len(emitters):
-            SIGNAL_COST = 0.5
+            SIGNAL_COST = 0.1  # 发射成本（降低，让信号基因不被纯成本淘汰）
             can_afford = energy[emitters] >= SIGNAL_COST
             emitters = emitters[can_afford]
             if len(emitters):
@@ -494,8 +524,10 @@ class SphereEngine:
                 self.signals.write_many(e_flat, patterns)
 
         # 5) 移动：raw 抽样在 Python（RNG），能量门槛判定两路径一致（Rust 在 stage2 内）
+        # g19 植物化：扎根倾向高的个体移动概率降低（g0 × (1-g19)）
+        move_prob = genes[:, 0] * (1.0 - genes[:, 19])
         if self._use_sim_core:
-            moved_raw = self.rng.random(P) < genes[:, 0]
+            moved_raw = self.rng.random(P) < move_prob
             move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, 6])
             out_moved = np.empty(P, dtype=bool)
             out_starved = np.empty(P, dtype=bool)
@@ -509,7 +541,7 @@ class SphereEngine:
             )
             moved = out_moved
         else:
-            moved = self.rng.random(P) < genes[:, 0]
+            moved = self.rng.random(P) < move_prob
             move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, 6])
             moved &= energy >= move_cost_ind  # 付得起才走
         Nm = int(moved.sum())
@@ -533,8 +565,26 @@ class SphereEngine:
                 perc = genes[idx, 14]
                 # g13 群居权重：>0.5 聚群（正），<0.5 避群（负）
                 soc = (genes[idx, 13] - 0.5) * 2.0
-                # 邻格得分 = 感知×(食物×0.7+信号×0.3) + 群居×密度
-                score = perc * (food_ratio[nb] * 0.7 + sig_present[nb] * 0.3) + soc * densities[nb]
+                # 邻格得分 = 感知×(食物×0.5+信号×0.5×信任度) + 群居×密度
+                # 信任度低的个体忽略信号（被欺骗过），信任度高的个体追随信号
+                score = perc * (
+                    food_ratio[nb] * 0.5 + sig_present[nb] * 0.5 * self._trust[idx]
+                ) + soc * densities[nb]
+                # 工作记忆：记忆中的食物格子在邻格中 → 额外加分
+                mem_cells = self._work_memory[idx]
+                valid_mem = mem_cells[mem_cells >= 0]
+                if len(valid_mem) > 0:
+                    mem_in_nb = np.isin(nb, valid_mem)
+                    score = score + 0.3 * perc * mem_in_nb.astype(np.float64)
+                # 信号解读表（L5 文化）：邻格有信号时，个体对该模式的解读影响得分
+                # 正值=移向（学到这信号代表食物），负值=逃避（学到这信号代表危险）
+                nb_sigs = self.signals._marks[nb]
+                if (nb_sigs > 0).any():
+                    interp = np.array(
+                        [self._interpret[idx, int(s)] if s > 0 else 0.0 for s in nb_sigs],
+                        dtype=np.float64,
+                    )
+                    score = score + 0.4 * perc * interp
                 if score.max() - score.min() < 1e-9:
                     # 得分无差异 → 随机（保留原有随机行为）
                     targets[i] = nb[int(self.rng.integers(0, len(nb)))]
@@ -544,42 +594,107 @@ class SphereEngine:
             if not self._use_sim_core:
                 energy[mi] -= move_cost_ind[mi]  # Rust 路径已在 stage2 内扣除
 
+            # 5.6) 信任学习（L5）：移动到有信号的格子后验证真假
+            #     真信号（有信号且有食物）→ trust+；假信号（有信号但无食物）→ trust-
+            target_cells = self._flat[mi]
+            had_signal = sig_present[target_cells] > 0
+            has_food = food_ratio[target_cells] > 0.3
+            true_sig = had_signal & has_food
+            false_sig = had_signal & ~has_food
+            self._trust[mi[true_sig]] = np.minimum(
+                1.0, self._trust[mi[true_sig]] + 0.05
+            )
+            self._trust[mi[false_sig]] = np.maximum(
+                0.0, self._trust[mi[false_sig]] - 0.1
+            )
+
+        # 5.5) 捕食（g16）：高攻击基因个体攻击邻格个体，获取能量
+        #     攻击概率 = g16 × 0.2 × 饥饿度（能量越低越可能攻击，避免过度捕食）
+        #     成功率 = 能量比 × 攻击力加成；成功后获得猎物 40% 能量和胃粮
+        predation_mask = np.zeros(P, dtype=bool)
+        attack_gene = genes[:, 16]
+        hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
+        attack_prob = attack_gene * 0.2 * hunger
+        attackers = np.flatnonzero(
+            (attack_gene > 0.3) & (self.rng.random(P) < attack_prob)
+        )
+        for idx in attackers:
+            if energy[idx] <= 0.1:
+                continue  # 能量不足以攻击
+            nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+            nb_mask = np.isin(self._flat[:P], nb) & (np.arange(P) != idx)
+            prey_candidates = np.flatnonzero(nb_mask)
+            if len(prey_candidates) == 0:
+                continue
+            prey = int(prey_candidates[int(self.rng.integers(0, len(prey_candidates)))])
+            if predation_mask[prey]:
+                continue  # 已被其他捕食者锁定
+            energy[idx] -= 0.1  # 攻击耗能（无论成败）
+            success_rate = np.clip(
+                (energy[idx] / max(energy[idx] + energy[prey], 1e-9))
+                * (0.5 + attack_gene[idx] * 0.5),
+                0.1, 0.9,
+            )
+            if self.rng.random() < success_rate:
+                predation_mask[prey] = True
+                energy[idx] += energy[prey] * 0.4
+                stomach[idx] = np.minimum(
+                    stomach[idx] + stomach[prey] * 0.4,
+                    ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
+                )
+                stomach[prey] = 0.0
+
         # 6) 年龄推进（Rust 路径已由 stage2 就地 +1）
         if not self._use_sim_core:
             self._age[:P] += 1
 
-        # 7) 死亡判定：饿死（energy<=0）→ 老死（age>=寿命）
-        if self._use_sim_core:
-            starved, expired = out_starved, out_expired
-        else:
-            starved = energy <= 0.0
-            life_span = self._lifespan(genes[:, 3])
-            expired = (
-                (~starved) & (self._age[:P].astype(np.float64) >= life_span)
-            )
-        dead = starved | expired
+        # 6.5) 文化学习（L5）：幼体向周围成体学习信号解读表（Kirby 迭代学习）
+        age_f = self._age[:P].astype(np.float64)
+        life_span = self._lifespan(genes[:, 3])
+        maturity_age = ocfg.maturity_fraction * life_span
+        juvenile = age_f < maturity_age
+        if juvenile.any():
+            j_idx = np.flatnonzero(juvenile)
+            for idx in j_idx:
+                nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                nb_mask = np.isin(self._flat[:P], nb)
+                adult_nb = nb_mask & (age_f >= maturity_age)
+                adult_idx = np.flatnonzero(adult_nb)
+                if len(adult_idx) > 0:
+                    mean_interpret = self._interpret[adult_idx].mean(axis=0)
+                    self._interpret[idx] += 0.1 * (mean_interpret - self._interpret[idx])
+
+        # 7) 死亡判定：饿死（energy<=0）→ 老死（age>=寿命）→ 被捕食
+        # 注意：统一用 Python 计算（不用 Rust 的 out_starved/out_expired），
+        # 因为捕食（步骤 5.5）在 Rust stage2 之后才执行，会改变 energy。
+        starved = energy <= 0.0
+        expired = (~starved) & (age_f >= life_span)
+        dead = starved | expired | predation_mask
         deaths: Counter = Counter()
         n_starved = int(starved.sum())
         n_expired = int(expired.sum())
+        n_predation = int(predation_mask.sum())
         if n_starved:
             deaths[DeathCause.STARVATION] = n_starved
         if n_expired:
             deaths[DeathCause.OLD_AGE] = n_expired
+        if n_predation:
+            deaths[DeathCause.PREDATION] = n_predation
 
         # 8) 繁殖：冷却期（g12）倒数；能量 ≥ 阈值（0.25+g2×0.65），且种群未满
-        if self._use_sim_core:
-            repro = out_repro  # 冷却倒数与成熟判定已在 Rust stage2 内完成
-        else:
+        # 注意：统一用 Python 计算繁殖判定（不用 Rust 的 out_repro），
+        # 因为捕食（5.5）和植物化（3.5）在 Rust stage2 之后才执行，会改变 energy。
+        if not self._use_sim_core:
             self._repro_cooldown[:P] = np.maximum(
                 0.0, self._repro_cooldown[:P] - 1.0
             )
-            repro_thr = (0.25 + genes[:, 2] * 0.65) * ocfg.max_energy
-            repro = (
-                (~dead)
-                & (energy >= repro_thr)
-                & (self._repro_cooldown[:P] <= 0.0)
-                & (age_f >= maturity_age)   # 未到成熟年龄不生（长大后才能繁衍）
-            )
+        repro_thr = (0.25 + genes[:, 2] * 0.65) * ocfg.max_energy
+        repro = (
+            (~dead)
+            & (energy >= repro_thr)
+            & (self._repro_cooldown[:P] <= 0.0)
+            & (age_f >= maturity_age)   # 未到成熟年龄不生（长大后才能繁衍）
+        )
         K = min(int(repro.sum()), self.config.population.max_count - P)
         born = 0
         if K > 0:
@@ -633,6 +748,17 @@ class SphereEngine:
             self._baseline = np.concatenate(
                 [self._baseline, self._baseline[ri] * 0.5]
             )
+            # 信任度：子代半继承亲代，回归中性 0.5
+            child_trust = self._trust[ri] * 0.8 + 0.5 * 0.2
+            self._trust = np.concatenate([self._trust, child_trust])
+            # 工作记忆：子代继承亲代的食物位置记忆（文化传递的一部分）
+            self._work_memory = np.concatenate(
+                [self._work_memory, self._work_memory[ri].copy()]
+            )
+            # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体）
+            child_interp = self._interpret[ri].copy()
+            child_interp += self.rng.normal(0.0, 0.1, size=child_interp.shape)
+            self._interpret = np.concatenate([self._interpret, child_interp])
             born = K
             new_max = int(self._generation.max())
             if new_max > self._max_generation:
@@ -675,10 +801,19 @@ class SphereEngine:
             self._expectation = np.concatenate(
                 [self._expectation[:P][keep], self._expectation[P:]]
             )
+            self._trust = np.concatenate(
+                [self._trust[:P][keep], self._trust[P:]]
+            )
+            self._work_memory = np.concatenate(
+                [self._work_memory[:P][keep], self._work_memory[P:]]
+            )
+            self._interpret = np.concatenate(
+                [self._interpret[:P][keep], self._interpret[P:]]
+            )
 
         if len(self._id) == 0:
             self._extinct = True
-        return born, n_starved + n_expired, Counter(deaths)
+        return born, n_starved + n_expired + n_predation, Counter(deaths)
 
     # ---- 愉悦度系统（L2） --------------------------------------------------
 
@@ -720,8 +855,8 @@ class SphereEngine:
         # 2) 事件收益
         delta_e = np.clip((energy_now - energy_before) / max_e, -1.0, 1.0)
         social = np.where(n_count > 0, 0.2, -0.1)  # 有同伴→正，孤独→负
-        # 信息增益：所在格有信号标记 → 获得信息（好奇心满足）
-        info = np.where(self.signals._marks[flat] > 0, 0.3, 0.0)
+        # 信息增益：所在格有信号标记 → 获得信息（好奇心满足），权重提高
+        info = np.where(self.signals._marks[flat] > 0, 0.5, 0.0)
         reward = pcfg.w_energy * delta_e + pcfg.w_info * info + pcfg.w_social * social
 
         # 3) RPE = 实际 − 预期

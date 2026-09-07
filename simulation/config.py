@@ -112,7 +112,7 @@ class OrganismConfig:
 class GenomeConfig:
     """基因底物参数：定长连续基因链 + 变异。"""
 
-    gene_count: int = 16            # 基因数量
+    gene_count: int = 24            # 基因数量（g0~g13 已用，g14 感知/g15 信号/g16 攻击/g17 食性/g18 防御/g19 扎根/g20 享乐/g21 处理位/g22 信任阈值/g23 预留）
     gene_min: float = 0.0           # 基因取值下限
     gene_max: float = 1.0           # 基因取值上限
     mutation_rate: float = 0.05     # 每个基因发生变异的概率

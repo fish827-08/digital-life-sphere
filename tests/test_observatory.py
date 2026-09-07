@@ -133,7 +133,7 @@ def test_overrides_merged_into_config() -> None:
     res = runner.run_single(ExperimentRun(spec=spec, seed=derive_seed(7, 3, 0)))
     assert res.config.genome.mutation_rate == 0.3
     # 未覆盖键保持默认
-    assert res.config.genome.gene_count == 16
+    assert res.config.genome.gene_count == 24
     assert res.config.resources.regrowth_rate == 0.5
 
 

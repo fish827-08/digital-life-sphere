@@ -21,7 +21,8 @@ def make_engine(n=1, seed=3):
 
 def set_genes(engine, row, **kw):
     """把单个体的基因链设成给定值（未给定位默认 0.5）。kw 键如 'g0'='g13'。"""
-    g = np.zeros((1, 16), dtype=np.float64)
+    gc = engine.config.genome.gene_count
+    g = np.zeros((1, gc), dtype=np.float64)
     g[0, :] = 0.5
     for k, v in kw.items():
         g[0, int(k.lstrip("g"))] = v
@@ -73,7 +74,8 @@ def test_maintenance_depends_on_age():
 
     def drain(age):
         e = make_engine()
-        g = np.zeros((1, 16), dtype=np.float64)
+        gc = e.config.genome.gene_count
+        g = np.zeros((1, gc), dtype=np.float64)
         g[0, :] = 0.0
         g[0, 1] = 1.0   # metab_mult = 2.0（确定性能耗）
         g[0, 3] = 1.0   # 寿命 = 2400×8 = 19200（成熟2880 / 老年14400，两点都在区间内）
@@ -102,7 +104,8 @@ def test_photosynthesis_income_g8():
     """有光合基因（g8=1）的个体在白天比没有的（g8=0）多获得少量能量。"""
     def run(g8):
         e = make_engine()
-        g = np.zeros((1, 16), dtype=np.float64)
+        gc = e.config.genome.gene_count
+        g = np.zeros((1, gc), dtype=np.float64)
         g[0, :] = 0.0
         g[0, 0] = 0.0   # 不动
         g[0, 1] = 0.0   # 代谢最低

@@ -37,7 +37,7 @@ def test_engine_tickstats_bitwise_equal(seed):
     py_e, rs_e = make_pair(seed)
     n_death_events = 0
     n_birth_events = 0
-    for _ in range(300):
+    for _ in range(500):
         s_py = py_e.step()
         s_rs = rs_e.step()
         assert s_rs == s_py, (
@@ -53,7 +53,7 @@ def test_engine_tickstats_bitwise_equal(seed):
 def test_engine_internal_state_bitwise_equal():
     """跑满后种群内部数组逐位相等（能量/胃/年龄/基因/冷却/世代/位置）。"""
     py_e, rs_e = make_pair(7)
-    for _ in range(300):
+    for _ in range(500):
         py_e.step()
         rs_e.step()
     assert py_e.alive_count() == rs_e.alive_count()
