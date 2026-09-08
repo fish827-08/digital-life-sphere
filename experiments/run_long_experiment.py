@@ -46,7 +46,7 @@ def _append_row(row, output_path):
 
 
 def _make_config(args):
-    cfg = SimConfig(seed=SEED)
+    cfg = SimConfig(seed=args.seed)
     cfg.world.rows = args.rows
     cfg.world.cols = args.cols
     n_cells = args.rows * args.cols
@@ -54,6 +54,10 @@ def _make_config(args):
     cfg.population.max_count = int(n_cells * args.density_cap)
     cfg.resources.distribution = "patchy"
     cfg.simulation.use_sim_core = True
+    # D3 世代时间扫描（云端实验用，None 时保持默认）；寿命基准随
+    # rotation_period 派生（_lifespan = day*(1+g3*7)），压缩于此同步提速世代
+    if args.rotation_period:
+        cfg.light.rotation_period = args.rotation_period
     return cfg
 
 
@@ -94,6 +98,10 @@ def main():
                         help="实验标签，用于命名快照和输出文件")
     parser.add_argument("--segment", type=int, default=0,
                         help="每段tick数，0表示一次性跑完（适合短实验）")
+    parser.add_argument("--seed", type=int, default=SEED,
+                        help="随机种子（长实验 ≥5 seed 系综用，D1 统计纪律）")
+    parser.add_argument("--rotation-period", type=int, default=0,
+                        help="世界自转周期覆盖（D3 世代时间扫描：默认2400，压缩到300~600 提速世代）")
     args = parser.parse_args()
 
     n_cells = args.rows * args.cols
