@@ -1,0 +1,125 @@
+{
+  "signal_vocabulary": {
+    "total_signals": 80000,
+    "unique_patterns": 5,
+    "entropy": 0.73821,
+    "normalized_entropy": 0.266253,
+    "zipf_r2": 0.832723,
+    "zipf_slope": -3.7301,
+    "freq_by_pattern": [
+      0.7559,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0251,
+      0.00075,
+      0.18295,
+      0.0353
+    ]
+  },
+  "cultural_diversity": {
+    "overall_std": 0.011748,
+    "per_pattern_std": [
+      0.005744,
+      0.011717,
+      0.006218,
+      0.016205,
+      0.014183,
+      0.010106,
+      0.010581,
+      0.013904,
+      0.008406,
+      0.011583,
+      0.017255,
+      0.023309,
+      0.00865,
+      0.012946,
+      0.00792,
+      0.009246
+    ],
+    "interpretation_range": 3.365316,
+    "total_variance": 0.002517,
+    "converged_patterns": 6
+  },
+  "generational_stability": {
+    "avg_correlation": 0.999999,
+    "generation_pairs": 1,
+    "per_gen_corr": {
+      "52->53": 0.999999
+    },
+    "stable_generations": 1
+  },
+  "spatial_clustering": {
+    "morans_i": 0.210106,
+    "same_neighbor_ratio": 0.678693,
+    "expected_same_random": 0.593228,
+    "active_cells": 19528,
+    "neighbor_pairs": 37030
+  },
+  "signal_context_mi": {
+    "mutual_information": 0.0,
+    "normalized_mi": 0.0,
+    "context_bins": 3,
+    "active_signals": 19528
+  },
+  "interpretation_consistency": {
+    "consistency_score": 0.960839,
+    "dominant_interpretation_ratio": 0.99951,
+    "per_pattern_consistency": [
+      0.980853,
+      0.960943,
+      0.979272,
+      0.945982,
+      0.952722,
+      0.966312,
+      0.964731,
+      0.953654,
+      0.971981,
+      0.961389,
+      0.942482,
+      0.922304,
+      0.971166,
+      0.956848,
+      0.973601,
+      0.969179
+    ],
+    "g14_interpret_diversity_corr": -0.051846
+  },
+  "signal_genotype_phenotype": {
+    "g15_mean": 0.698811,
+    "g15_signal_corr": -0.014124,
+    "high_g15_fraction": 0.96083,
+    "high_g15_signal_rate": 0.99948,
+    "low_g15_signal_rate": 1.0,
+    "signal_rate_diff": -0.00052
+  },
+  "language_emergence_score": {
+    "total_score": null,
+    "note": "0-100 综合分已废弃（6 模型外部评估 D4/元宝）：占 20% 权重的 signal_context_mi 恒 0、generational_stability 样本不足，未演化快照即得 56.94，总分无区分度。只报 7 维子分；判别判据转移到相对零模型超额量（D1 对照实现）。",
+    "subscores": {
+      "vocabulary_richness": 0.3804,
+      "zipf_structure": 0.2498,
+      "cultural_diversity": 0.1175,
+      "generational_stability": 1.0,
+      "spatial_clustering": 0.4202,
+      "signal_context_mi": 0,
+      "interpretation_consistency": 0.9608
+    }
+  },
+  "meta": {
+    "snapshot": "snapshot_large.npz",
+    "tick": 1000000,
+    "alive_count": 11999,
+    "max_generation": 53,
+    "n_cells": 80000,
+    "grid": "200x400"
+  }
+}
