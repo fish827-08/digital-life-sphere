@@ -61,9 +61,9 @@ def _stats(e, tick, rate, elapsed_h, pred_cum):
     n_cells = e.world.n_cells
     density = p / n_cells
     g = e._genes[:p].mean(axis=0) if p > 0 else np.zeros(e.gene_count)
-    sig_density = int(e.signal_field.active_count()) if hasattr(e, 'signal_field') else 0
+    sig_density = int(e.signals.active_count()) if hasattr(e, 'signals') else 0
     trust = float(e._trust[:p].mean()) if p > 0 and hasattr(e, '_trust') else 0.0
-    cult_div = float(e._interpret[:p].std()) if p > 0 and hasattr(e, '_interpret') else 0.0
+    cult_div = float(e._interpret[:p].std(axis=0).mean()) if p > 0 and hasattr(e, '_interpret') else 0.0
     valence = float(e._valence[:p].mean()) if p > 0 and hasattr(e, '_valence') else 0.0
     arousal = float(e._arousal[:p].mean()) if p > 0 and hasattr(e, '_arousal') else 0.0
     total_energy = float(e._energy[:p].sum()) if p > 0 else 0.0
