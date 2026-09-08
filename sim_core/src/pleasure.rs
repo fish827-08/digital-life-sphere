@@ -7,6 +7,39 @@
 //! 4. 更新 valence（瞬态）/arousal（唤醒）/expectation（EWMA）/baseline（习惯化）
 //!
 //! 只更新前 P 个个体（本 tick 开始时存在的亲代），子代不参与本 tick。
+//!
+//! 并行化：纯逐元素运算，每个个体只读写自己的 valence/arousal/expectation[context]/baseline，
+//! 无跨个体数据竞争。使用 Rayon + SyncPtr 包装裸指针，与单线程版本逐位一致。
+
+use rayon::prelude::*;
+
+#[derive(Clone, Copy)]
+struct SyncPtr<T>(*mut T);
+unsafe impl<T> Sync for SyncPtr<T> {}
+unsafe impl<T> Send for SyncPtr<T> {}
+
+impl<T> SyncPtr<T> {
+    #[inline(always)]
+    unsafe fn add(self, i: usize) -> *mut T {
+        self.0.add(i)
+    }
+}
+
+const PAR_THRESHOLD: usize = 2048;
+
+#[inline]
+fn par_for<F>(n: usize, f: F)
+where
+    F: Fn(usize) + Sync + Send,
+{
+    if n < PAR_THRESHOLD {
+        for i in 0..n {
+            f(i);
+        }
+    } else {
+        (0..n).into_par_iter().for_each(f);
+    }
+}
 
 /// 愉悦度批量更新。
 ///
@@ -64,81 +97,46 @@ pub fn pleasure_update_batch(
 
     let max_e = if max_energy > 0.0 { max_energy } else { 1.0 };
 
-    for i in 0..n {
+    let v_p = SyncPtr(valence.as_mut_ptr());
+    let a_p = SyncPtr(arousal.as_mut_ptr());
+    let exp_p = SyncPtr(expectation.as_mut_ptr());
+    let bl_p = SyncPtr(baseline.as_mut_ptr());
+    par_for(n, |i| {
         let cell = flat[i] as usize;
+        unsafe {
+            // 1) 情境编码
+            let e_raw = energy_now[i] / max_e * 5.0;
+            let e_bin = if e_raw < 0.0 { 0i64 } else if e_raw >= 5.0 { 4 } else { e_raw as i64 };
+            let cap = if resource_capacity[cell] > 1e-9 { resource_capacity[cell] } else { 1e-9 };
+            let food_ratio = (resource_grid[cell] / cap).clamp(0.0, 1.0);
+            let f_raw = food_ratio * 4.0;
+            let f_bin = if f_raw < 0.0 { 0i64 } else if f_raw >= 4.0 { 3 } else { f_raw as i64 };
+            let n_count = densities[cell];
+            let n_bin = if n_count <= 0.0 { 0i64 } else if n_count <= 2.0 { 1 } else { 2 };
+            let context = (e_bin * 24 + f_bin * 6 + n_bin * 2) as usize;
 
-        // 1) 情境编码
-        // 能量档：energy_now / max_e * 5 → 0~4
-        let e_raw = energy_now[i] / max_e * 5.0;
-        let e_bin = if e_raw < 0.0 {
-            0i64
-        } else if e_raw >= 5.0 {
-            4
-        } else {
-            e_raw as i64
-        };
-        // 食物档：resource_grid / capacity → 0~3
-        let cap = if resource_capacity[cell] > 1e-9 {
-            resource_capacity[cell]
-        } else {
-            1e-9
-        };
-        let food_ratio = resource_grid[cell] / cap;
-        let food_ratio = food_ratio.clamp(0.0, 1.0);
-        let f_raw = food_ratio * 4.0;
-        let f_bin = if f_raw < 0.0 {
-            0i64
-        } else if f_raw >= 4.0 {
-            3
-        } else {
-            f_raw as i64
-        };
-        // 邻居档：所在格密度 → 0(无)/1(1-2)/2(3+)
-        let n_count = densities[cell];
-        let n_bin = if n_count <= 0.0 {
-            0i64
-        } else if n_count <= 2.0 {
-            1
-        } else {
-            2
-        };
-        // 信号档：第一版全 0（待 L3 信号基因接入后填）
-        let s_bin = 0i64;
-        // 组合索引：e×24 + f×6 + n×2 + s
-        let context = (e_bin * 24 + f_bin * 6 + n_bin * 2 + s_bin) as usize;
+            // 2) 事件收益
+            let delta_e = ((energy_now[i] - energy_before[i]) / max_e).clamp(-1.0, 1.0);
+            let social = if n_count > 0.0 { 0.2 } else { -0.1 };
+            let info = if signal_marks[cell] > 0 { 0.5 } else { 0.0 };
+            let reward = w_energy * delta_e + w_info * info + w_social * social;
 
-        // 2) 事件收益
-        // Δ能量 = (energy_now - energy_before) / max_e，clip(-1, 1)
-        let delta_e = ((energy_now[i] - energy_before[i]) / max_e).clamp(-1.0, 1.0);
-        // 社会：有同伴→+0.2，孤独→-0.1
-        let social = if n_count > 0.0 { 0.2 } else { -0.1 };
-        // 信息：所在格有信号→+0.5
-        let info = if signal_marks[cell] > 0 { 0.5 } else { 0.0 };
-        let reward = w_energy * delta_e + w_info * info + w_social * social;
+            // 3) RPE
+            let exp_idx = i * 120 + context;
+            let exp = *exp_p.add(exp_idx);
+            let rpe = reward - exp;
 
-        // 3) RPE = 实际 − 预期
-        let exp_idx = i * 120 + context;
-        let exp = expectation[exp_idx];
-        let rpe = reward - exp;
+            // 4) 更新
+            let mut v = (*v_p.add(i) + rpe * 0.3) * valence_decay;
+            v = v.clamp(-1.0, 1.0);
+            *v_p.add(i) = v;
 
-        // 4) 更新四数组
-        // valence：瞬态响应 + 衰减回中性
-        let mut v = valence[i] + rpe * 0.3;
-        v *= valence_decay;
-        v = v.clamp(-1.0, 1.0);
-        valence[i] = v;
+            let mut a = (*a_p.add(i) + rpe.abs() * 0.2) * arousal_decay;
+            a = a.clamp(0.0, 1.0);
+            *a_p.add(i) = a;
 
-        // arousal：意外事件（|RPE| 大）→ 高唤醒
-        let mut a = arousal[i] + rpe.abs() * 0.2;
-        a *= arousal_decay;
-        a = a.clamp(0.0, 1.0);
-        arousal[i] = a;
-
-        // expectation：EWMA 学习
-        let new_exp = (exp + alpha * rpe).clamp(0.0, max_reward);
-        expectation[exp_idx] = new_exp;
-
-        // baseline：慢漂移（习惯化）
-        baseline[i] = baseline[i] * (1.0 - baseline_rate) + v * baseline_rate;
-    }
+            *exp_p.add(exp_idx) = (exp + alpha * rpe).clamp(0.0, max_reward);
+            *bl_p.add(i) = *bl_p.add(i) * (1.0 - baseline_rate) + v * baseline_rate;
+        }
+    });
 }

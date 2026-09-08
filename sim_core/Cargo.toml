@@ -20,6 +20,7 @@ crate-type = ["cdylib"]  # .pyd / .so 扩展，供 Python import
 [dependencies]
 pyo3 = "0.26"
 numpy = "0.26"
+rayon = "1.10"
 
 [profile.release]
 lto = true

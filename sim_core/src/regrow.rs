@@ -11,6 +11,10 @@
 //!
 //! 对拍保证：`temp_sensitivity == 1.0` 时跳过 `powf`（默认配置正是 1.0），
 //! 与 numpy 的线性因子完全一致，可逐位相等断言；非 1 时用容差断言。
+//!
+//! 并行化：纯逐格运算，使用 Rayon 并行。每格独立读写，无数据竞争。
+
+use rayon::prelude::*;
 
 /// 就地更新每格食物存量（grid 被原地改写，返回即更新后的存量）。
 ///
@@ -27,15 +31,15 @@ pub fn regrow(
 
     if temp_sensitivity == 1.0 {
         // 线性因子：无 pow，与 numpy 逐位一致
-        for i in 0..grid.len() {
+        grid.par_iter_mut().enumerate().for_each(|(i, g)| {
             let factor = clamp01((temperature[i] + 20.0) / 20.0);
-            grid[i] = take_min(grid[i] + regrow_rate * factor, capacity[i]);
-        }
+            *g = take_min(*g + regrow_rate * factor, capacity[i]);
+        });
     } else {
-        for i in 0..grid.len() {
+        grid.par_iter_mut().enumerate().for_each(|(i, g)| {
             let factor = clamp01((temperature[i] + 20.0) / 20.0).powf(temp_sensitivity);
-            grid[i] = take_min(grid[i] + regrow_rate * factor, capacity[i]);
-        }
+            *g = take_min(*g + regrow_rate * factor, capacity[i]);
+        });
     }
 }
 
@@ -73,7 +77,7 @@ pub fn regrow_patchy(
     debug_assert_eq!(grid.len(), temperature.len());
     debug_assert_eq!(grid.len(), patch_mask.len());
 
-    for i in 0..grid.len() {
+    grid.par_iter_mut().enumerate().for_each(|(i, g)| {
         let factor = clamp01((temperature[i] + 20.0) / 20.0);
         let factor = if temp_sensitivity == 1.0 {
             factor
@@ -85,8 +89,8 @@ pub fn regrow_patchy(
         } else {
             bg_regrowth_mult
         };
-        grid[i] = take_min(grid[i] + regrow_rate * factor * mult, capacity[i]);
-    }
+        *g = take_min(*g + regrow_rate * factor * mult, capacity[i]);
+    });
 }
 
 /// 与 np.minimum(cap, x) 等价（相等时取 cap，值相同）。

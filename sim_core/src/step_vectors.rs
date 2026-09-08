@@ -22,6 +22,45 @@
 //!
 //! 入参长度约定：除 genes 外所有数组长度均为 n（本 tick 存活者数）；
 //! genes 为行主序展开的 (n × gene_count) 平坦切片。
+//!
+//! 并行化：stage1/stage2 均为纯逐元素运算（每个 i 完全独立、无跨元素读写），
+//! 使用 Rayon 并行。SyncPtr 包装裸指针实现 Sync/Send（Rayon 保证索引 i 不重复，
+//! 不存在数据竞争）。与单线程版本逐位一致（f64 运算顺序不变）。
+
+use rayon::prelude::*;
+
+/// 裸指针的 Sync/Send 包装：Rayon 并行迭代中每个索引只被一个线程访问，
+/// 因此通过裸指针的读写不存在数据竞争。仅用于本模块内部的并行热路径。
+/// 注意：必须通过方法访问指针，避免闭包最小化捕获只抓到裸指针字段。
+#[derive(Clone, Copy)]
+struct SyncPtr<T>(*mut T);
+unsafe impl<T> Sync for SyncPtr<T> {}
+unsafe impl<T> Send for SyncPtr<T> {}
+
+impl<T> SyncPtr<T> {
+    #[inline(always)]
+    unsafe fn add(self, i: usize) -> *mut T {
+        self.0.add(i)
+    }
+}
+
+/// 并行 for：n >= PAR_THRESHOLD 时用 Rayon，否则单线程。
+/// 小规模下 Rayon 调度开销大于收益，阈值避免退化。
+const PAR_THRESHOLD: usize = 2048;
+
+#[inline]
+fn par_for<F>(n: usize, f: F)
+where
+    F: Fn(usize) + Sync + Send,
+{
+    if n < PAR_THRESHOLD {
+        for i in 0..n {
+            f(i);
+        }
+    } else {
+        (0..n).into_par_iter().for_each(f);
+    }
+}
 
 /// 第 1~3 步：光合收入 + 代谢转化 + 维持扣费（就地更新 energy/stomach）。
 ///
@@ -59,37 +98,38 @@ pub fn step_vectors_stage1(
     debug_assert_eq!(energy.len() * gene_count, genes.len());
 
     let n = energy.len();
-    for i in 0..n {
+    let e_p = SyncPtr(energy.as_mut_ptr());
+    let s_p = SyncPtr(stomach.as_mut_ptr());
+    par_for(n, |i| {
         let g = &genes[i * gene_count..(i + 1) * gene_count];
+        unsafe {
+            let e = &mut *e_p.add(i);
+            let st = &mut *s_p.add(i);
 
-        // 1) 光合收入（第 1 步）
-        energy[i] += illumination[i] * g[8] * photo_max;
+            // 1) 光合收入
+            *e += illumination[i] * g[8] * photo_max;
 
-        // 2) 代谢转化：胃 → 能量（第 2 步）
-        let metab_mult = 0.5 + g[1] * 1.5;
-        let digest_rate = base_metabolism * metab_mult * eff_activity[i];
-        let digest = if stomach[i] < digest_rate {
-            stomach[i]
-        } else {
-            digest_rate
-        };
-        energy[i] += digest * eat_efficiency;
-        stomach[i] -= digest;
+            // 2) 代谢转化
+            let metab_mult = 0.5 + g[1] * 1.5;
+            let digest_rate = base_metabolism * metab_mult * eff_activity[i];
+            let digest = if *st < digest_rate { *st } else { digest_rate };
+            *e += digest * eat_efficiency;
+            *st -= digest;
 
-        // 3) 基础维持 + 恒温维持费（第 3 步）
-        //    成熟/老年年龄按各自寿命（g3）的比例划分，寿命长的成熟和老化都更晚。
-        let life_span = day_length * (1.0 + g[3] * 7.0);
-        let a = age[i] as f64;
-        let age_mult = if a < maturity_fraction * life_span {
-            growth_mult
-        } else if a >= senile_fraction * life_span {
-            senile_mult
-        } else {
-            1.0
-        };
-        energy[i] -= base_metabolism * metab_mult * age_mult;
-        energy[i] -= homeo_upkeep * g[9];
-    }
+            // 3) 维持扣费
+            let life_span = day_length * (1.0 + g[3] * 7.0);
+            let a = age[i] as f64;
+            let age_mult = if a < maturity_fraction * life_span {
+                growth_mult
+            } else if a >= senile_fraction * life_span {
+                senile_mult
+            } else {
+                1.0
+            };
+            *e -= base_metabolism * metab_mult * age_mult;
+            *e -= homeo_upkeep * g[9];
+        }
+    });
 }
 
 /// 第 5~8 步：移动扣费 + 年龄推进 + 死亡判定 + 冷却倒数与繁殖候选。
@@ -137,36 +177,43 @@ pub fn step_vectors_stage2(
     debug_assert_eq!(energy.len() * gene_count, genes.len());
 
     let n = energy.len();
-    for i in 0..n {
+    let e_p = SyncPtr(energy.as_mut_ptr());
+    let a_p = SyncPtr(age.as_mut_ptr());
+    let c_p = SyncPtr(cooldown.as_mut_ptr());
+    let om_p = SyncPtr(out_moved.as_mut_ptr());
+    let os_p = SyncPtr(out_starved.as_mut_ptr());
+    let oe_p = SyncPtr(out_expired.as_mut_ptr());
+    let or_p = SyncPtr(out_repro.as_mut_ptr());
+    par_for(n, |i| {
         let g = &genes[i * gene_count..(i + 1) * gene_count];
         let life_span = day_length * (1.0 + g[3] * 7.0);
-        let a = age[i];
+        unsafe {
+            let a = *a_p.add(i);
+            let e = &mut *e_p.add(i);
 
-        // 5) 移动扣费（第 5 步后半）：付得起才走
-        let can_move = moved_raw[i] && energy[i] >= move_cost_ind[i];
-        out_moved[i] = can_move;
-        if can_move {
-            energy[i] -= move_cost_ind[i];
+            // 5) 移动扣费
+            let can_move = moved_raw[i] && *e >= move_cost_ind[i];
+            *om_p.add(i) = can_move;
+            if can_move { *e -= move_cost_ind[i]; }
+
+            // 6) 年龄推进
+            *a_p.add(i) = a + 1;
+
+            // 7) 死亡判定
+            let starved = *e <= 0.0;
+            let expired = !starved && (a as f64 + 1.0) >= life_span;
+            *os_p.add(i) = starved;
+            *oe_p.add(i) = expired;
+            let dead = starved || expired;
+
+            // 8) 冷却倒数 + 繁殖候选
+            let cd_cell = &mut *c_p.add(i);
+            let mut cd = *cd_cell - 1.0;
+            if cd < 0.0 { cd = 0.0; }
+            *cd_cell = cd;
+            let repro_thr = (0.25 + g[2] * 0.65) * max_energy;
+            let mature = (a as f64) >= maturity_fraction * life_span;
+            *or_p.add(i) = !dead && *e >= repro_thr && cd <= 0.0 && mature;
         }
-
-        // 6) 年龄推进（第 6 步）
-        age[i] = a + 1;
-
-        // 7) 死亡判定（第 7 步）：饿死 → 老死（用 +1 后的年龄）
-        let starved = energy[i] <= 0.0;
-        let expired = !starved && (a as f64 + 1.0) >= life_span;
-        out_starved[i] = starved;
-        out_expired[i] = expired;
-        let dead = starved || expired;
-
-        // 8) 冷却倒数 + 繁殖候选（第 8 步，成熟用 +1 前的年龄）
-        let mut cd = cooldown[i] - 1.0;
-        if cd < 0.0 {
-            cd = 0.0;
-        }
-        cooldown[i] = cd;
-        let repro_thr = (0.25 + g[2] * 0.65) * max_energy;
-        let mature = (a as f64) >= maturity_fraction * life_span;
-        out_repro[i] = !dead && energy[i] >= repro_thr && cd <= 0.0 && mature;
-    }
+    });
 }
