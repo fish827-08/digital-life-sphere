@@ -58,6 +58,10 @@ def _make_config(args):
     # rotation_period 派生（_lifespan = day*(1+g3*7)），压缩于此同步提速世代
     if args.rotation_period:
         cfg.light.rotation_period = args.rotation_period
+    # D1 零模型三开关
+    cfg.neutral_genes = args.neutral_genes
+    cfg.signal_disabled = args.signal_disabled
+    cfg.signal_mode = args.signal_mode
     return cfg
 
 
@@ -102,6 +106,14 @@ def main():
                         help="随机种子（长实验 ≥5 seed 系综用，D1 统计纪律）")
     parser.add_argument("--rotation-period", type=int, default=0,
                         help="世界自转周期覆盖（D3 世代时间扫描：默认2400，压缩到300~600 提速世代）")
+    # D1 零模型三开关（进 SimConfig.fingerprint，用于对照实验）
+    parser.add_argument("--neutral-genes", action="store_true",
+                        help="D1 基因断线：所有基因恒=0.5（读取侧冻结，写入侧照常）")
+    parser.add_argument("--signal-disabled", action="store_true",
+                        help="D1 不发信号：发射概率恒0（接收/解读照常）")
+    parser.add_argument("--signal-mode", type=str, default="state",
+                        choices=["state", "random", "evolved"],
+                        help="D1 信号编码模式：state(现状)/random(独立rng随机)/evolved(D2码本暂未接线)")
     args = parser.parse_args()
 
     n_cells = args.rows * args.cols
@@ -113,6 +125,8 @@ def main():
     print(f"世界: {args.rows}x{args.cols} = {n_cells}格")
     print(f"种群: 初始={args.initial}, 上限={max_count} (密度={args.density_cap*100:.0f}%)")
     print(f"目标: {args.ticks} tick")
+    if args.neutral_genes or args.signal_disabled or args.signal_mode != "state":
+        print(f"D1 零模型: neutral_genes={args.neutral_genes}, signal_disabled={args.signal_disabled}, signal_mode={args.signal_mode}")
     print(f"快照: {snapshot_path}")
     print(f"输出: {output_path}")
 

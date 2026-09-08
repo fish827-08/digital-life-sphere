@@ -417,6 +417,10 @@ class SphereEngine:
         genes = self._genes[:P]
         energy = self._energy[:P]
         stomach = self._stomach[:P]
+        # D1 neutral_genes：读取侧冻结——所有基因恒=0.5，写入侧（繁殖继承/突变）照常，
+        # 不碰 RNG 顺序。下一代 step 开始时再次重置，保证基因不演化。
+        if self.config.neutral_genes:
+            genes[:] = 0.5
         # 愉悦度：记录 tick 开始时的能量（步骤 1~8 会修改 energy）
         energy_before = energy.copy() if self.config.pleasure.enabled else None
 
@@ -560,13 +564,21 @@ class SphereEngine:
         #     与移动段（5）共用；此段 _flat 尚未变化（移动在步骤 5），len(_flat)==P，
         #     语义与各调用点原 np.bincount(self._flat[:P]) 逐位一致。
         occ = np.bincount(self._flat[:P], minlength=self.world.n_cells)
-        signal_gene = genes[:, Gene.SIGNAL_STRENGTH]
+        signal_gene = genes[:, Gene.SIGNAL_STRENGTH].copy()
         rand_emit = self.rng.random(P)  # 双路径共用：Python 直接用，Rust 传入
-        if self._use_sim_core:
+        # D1 signal_disabled：发射概率恒0（signal_gene置零），RNG消费照常保对拍
+        if self.config.signal_disabled:
+            signal_gene[:] = 0.0
+        # D1 signal_mode=random：独立 rng 预生成随机模式（严禁消费主 rng）
+        random_patterns = None
+        if self.config.signal_mode == "random":
+            rng_rand = np.random.default_rng(self.config.seed + 99991)  # 独立种子偏移
+            random_patterns = rng_rand.integers(1, 16, size=P, dtype=np.uint8)
+        if self._use_sim_core and random_patterns is None:
             SIGNAL_COST = 0.1
             dens = occ.astype(np.float64)
             self._sim_core.signal_emit(
-                self._flat[:P], energy, signal_gene.copy(), rand_emit,
+                self._flat[:P], energy, signal_gene, rand_emit,
                 dens, self.resources._grid, self.resources._capacity,
                 self.signals._marks, self.signals._age,
                 SIGNAL_COST, ocfg.max_energy, self.signals.duration,
@@ -580,16 +592,20 @@ class SphereEngine:
                 if len(emitters):
                     energy[emitters] -= SIGNAL_COST
                     e_flat = self._flat[emitters]
-                    # 模式编码：能量档(2位,bit3-2) + 食物(1位,bit1) + 邻居(1位,bit0)
-                    e_bin = np.clip(
-                        (energy[emitters] / max(1e-9, ocfg.max_energy) * 4).astype(np.int64), 0, 3
-                    )
-                    f_bit = (
-                        self.resources._grid[e_flat]
-                        > 0.5 * self.resources._capacity[e_flat]
-                    ).astype(np.int64)
-                    n_bit = (occ[e_flat] > 1).astype(np.int64)
-                    patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
+                    if random_patterns is not None:
+                        # D1 random 模式：用独立 rng 预生成的随机模式
+                        patterns = random_patterns[emitters]
+                    else:
+                        # 模式编码：能量档(2位,bit3-2) + 食物(1位,bit1) + 邻居(1位,bit0)
+                        e_bin = np.clip(
+                            (energy[emitters] / max(1e-9, ocfg.max_energy) * 4).astype(np.int64), 0, 3
+                        )
+                        f_bit = (
+                            self.resources._grid[e_flat]
+                            > 0.5 * self.resources._capacity[e_flat]
+                        ).astype(np.int64)
+                        n_bit = (occ[e_flat] > 1).astype(np.int64)
+                        patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
                     self.signals.write_many(e_flat, patterns)
 
         # 4.5) L10a 动物吃果实→能量转移（默认关闭；确定性数值管线，Rust 可下沉）

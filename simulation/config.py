@@ -281,6 +281,11 @@ class SimConfig:
     culture: CultureConfig = field(default_factory=CultureConfig)
     fruit: FruitConfig = field(default_factory=FruitConfig)
 
+    # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
+    neutral_genes: bool = False          # 基因断线：读取侧基因恒=0.5，写入侧照常（保 RNG 顺序）
+    signal_disabled: bool = False        # 不发信号：发射概率恒0，接收/解读照常
+    signal_mode: str = "state"           # 信号编码：state(现状)/random(独立rng随机)/evolved(D2码本暂未接线)
+
     # ---- 可复现性辅助：配置 ⇄ dict ------------------------------
 
     def to_dict(self) -> dict:
@@ -325,6 +330,10 @@ class SimConfig:
                 if "fruit" in data
                 else FruitConfig()
             ),
+            # D1 零模型三开关；旧存档回退默认值。
+            neutral_genes=data.get("neutral_genes", False),
+            signal_disabled=data.get("signal_disabled", False),
+            signal_mode=data.get("signal_mode", "state"),
         )
 
     def fingerprint(self) -> str:
