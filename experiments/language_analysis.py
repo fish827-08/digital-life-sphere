@@ -386,28 +386,11 @@ def language_emergence_score(metrics: dict) -> dict:
     # 7. 解读一致性：consistency_score > 0.5
     consistency_score = max(0, consistency["consistency_score"])
 
-    # 加权综合
-    weights = {
-        "vocabulary": 0.15,
-        "zipf_structure": 0.10,
-        "cultural_diversity": 0.10,
-        "generational_stability": 0.20,
-        "spatial_clustering": 0.10,
-        "signal_context_mi": 0.20,
-        "interpretation_consistency": 0.15,
-    }
-    total = (
-        weights["vocabulary"] * vocab_score +
-        weights["zipf_structure"] * zipf_score +
-        weights["cultural_diversity"] * culture_score +
-        weights["generational_stability"] * stability_score +
-        weights["spatial_clustering"] * spatial_score +
-        weights["signal_context_mi"] * mi_score +
-        weights["interpretation_consistency"] * consistency_score
-    )
-
     return {
-        "total_score": round(total * 100, 2),
+        "total_score": None,
+        "note": ("0-100 综合分已废弃（6 模型外部评估 D4/元宝）：占 20% 权重的 "
+                 "signal_context_mi 恒 0、generational_stability 样本不足，未演化快照即得 56.94，"
+                 "总分无区分度。只报 7 维子分；判别判据转移到相对零模型超额量（D1 对照实现）。"),
         "subscores": {
             "vocabulary_richness": round(vocab_score, 4),
             "zipf_structure": round(zipf_score, 4),
@@ -417,24 +400,7 @@ def language_emergence_score(metrics: dict) -> dict:
             "signal_context_mi": round(mi_score, 4),
             "interpretation_consistency": round(consistency_score, 4),
         },
-        "weights": weights,
-        "interpretation": _interpret_score(total),
     }
-
-
-def _interpret_score(score: float) -> str:
-    if score < 10:
-        return "无语言迹象：信号基本是随机或单一的，无共享语义"
-    elif score < 25:
-        return "初级信号系统：有简单信号使用，但缺乏结构和共享语义"
-    elif score < 40:
-        return "原语言阶段：信号有一定词汇结构和语境关联，但文化传承不稳定"
-    elif score < 60:
-        return "语言涌现中：信号有词汇等级、语境指代和文化传承，接近真正语言"
-    elif score < 80:
-        return "显著语言涌现：信号系统具备语言的多数核心特征"
-    else:
-        return "成熟语言系统：信号系统高度结构化、可传承、有丰富语义"
 
 
 # ─── 主函数 ───────────────────────────────────────────────────────────
@@ -520,8 +486,7 @@ def main():
     print(f"g15均值: {metrics['signal_genotype_phenotype']['g15_mean']:.4f}")
     print(f"g15-信号相关: {metrics['signal_genotype_phenotype']['g15_signal_corr']:.4f}")
     print("-" * 60)
-    print(f"综合语言涌现评分: {score['total_score']}/100")
-    print(f"解读: {score['interpretation']}")
+    print("综合分：已废弃（D4，见 JSON note）；7 维子分见上方指标")
     print("=" * 60)
 
 
