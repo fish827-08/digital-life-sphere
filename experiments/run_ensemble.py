@@ -99,6 +99,11 @@ def main():
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4,
                         help="并发进程数（默认 = 逻辑核数）")
     parser.add_argument("--rotation-period", type=int, default=0)
+    # D1 零模型三开关（透传给 run_long_experiment.py）
+    parser.add_argument("--neutral-genes", action="store_true")
+    parser.add_argument("--signal-disabled", action="store_true")
+    parser.add_argument("--signal-mode", type=str, default="state",
+                        choices=["state", "random", "evolved"])
     args = parser.parse_args()
 
     tag = args.tag
@@ -122,6 +127,12 @@ def main():
                     "--tag", f"{tag}_s{seed}", "--seed", str(seed)]
         if args.rotation_period:
             cmd_base += ["--rotation-period", str(args.rotation_period)]
+        if args.neutral_genes:
+            cmd_base += ["--neutral-genes"]
+        if args.signal_disabled:
+            cmd_base += ["--signal-disabled"]
+        if args.signal_mode != "state":
+            cmd_base += ["--signal-mode", args.signal_mode]
         with sem:
             t0 = time.time()
             rc, err = 0, ""
