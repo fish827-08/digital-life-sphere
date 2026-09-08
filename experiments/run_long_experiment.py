@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from simulation.config import SimConfig
 from simulation.sphere_engine import SphereEngine
+from core.lifecycle import DeathCause
 
 RECORD_INTERVAL = 2000
 SEED = 42
@@ -56,7 +57,7 @@ def _make_config(args):
     return cfg
 
 
-def _stats(e, tick, rate, elapsed_h, pred_cum):
+def _stats(e, tick, rate, elapsed_h):
     p = e.alive_count()
     n_cells = e.world.n_cells
     density = p / n_cells
@@ -68,6 +69,8 @@ def _stats(e, tick, rate, elapsed_h, pred_cum):
     arousal = float(e._arousal[:p].mean()) if p > 0 and hasattr(e, '_arousal') else 0.0
     total_energy = float(e._energy[:p].sum()) if p > 0 else 0.0
     max_gen = int(e._generation[:p].max()) if p > 0 else 0
+    # D0 修复：pred_cum 从引擎全局计数实时取（此前恒 0），elapsed_h 跨段累计
+    pred_cum = float(e.death_cause_totals().get(DeathCause.PREDATION, 0))
     return [tick, p, f"{density:.4f}", sig_density,
             f"{g[14]:.4f}" if len(g) > 14 else "0",
             f"{g[15]:.4f}" if len(g) > 15 else "0",
@@ -117,14 +120,14 @@ def main():
         start_tick = 0
         print(f"新实验初始化: N={e.alive_count()}")
 
-    # 从CSV恢复pred_cum
-    pred_cum = 0
+    # 从CSV恢复跨段累计 elapsed_h（此前只记本段，误导分析）
+    elapsed_h_acc = 0.0
     if os.path.exists(output_path):
         with open(output_path, "r") as f:
             lines = f.readlines()
             if len(lines) > 1:
                 last = lines[-1].strip().split(",")
-                pred_cum = float(last[12]) if len(last) > 12 else 0
+                elapsed_h_acc = float(last[15]) if len(last) > 15 else 0.0
 
     t0 = time.time()
     ticks_this_run = 0
@@ -140,8 +143,8 @@ def main():
         if (tick + 1) % RECORD_INTERVAL == 0:
             elapsed = time.time() - t0
             rate = ticks_this_run / elapsed if elapsed > 0 else 0
-            elapsed_h = elapsed / 3600
-            row = _stats(e, tick + 1, rate, elapsed_h, pred_cum)
+            elapsed_h = elapsed_h_acc + elapsed / 3600
+            row = _stats(e, tick + 1, rate, elapsed_h)
             _append_row(row, output_path)
             print(f"  tick={tick+1}, N={e.alive_count()}, density={e.alive_count()/n_cells:.3f}, "
                   f"rate={rate:.0f} tick/s, g15={row[5]}, max_gen={row[16]}")

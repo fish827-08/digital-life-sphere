@@ -149,6 +149,7 @@ class SimulationConfig:
     stop_on_extinction: bool = True    # 种群归零时提前停
     history_limit: int = 0          # 统计历史保留上限（0=无限，长程实验用环形尾部）
     use_sim_core: bool = False      # True=种群数值管线走 Rust（sim_core.step_vectors）
+    social_move_weight: float = 1.0 # 移动决策群居项权重（D0 修复：densities 按邻居上限归一化后与感知项同量级，此项可扫描 0~2）
 
     def __post_init__(self) -> None:
         assert self.ticks >= 1, "至少跑一个 tick"

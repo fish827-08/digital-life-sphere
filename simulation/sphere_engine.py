@@ -618,9 +618,14 @@ class SphereEngine:
                     self.resources._capacity, 1e-9
                 )
                 sig_present = (self.signals._marks > 0).astype(np.float64)
+                # D0 修复：群居项量纲归一化（按邻居上限 8 归一化 + 权重），
+                # 避免未归一化 bincount(0~8) 压过感知/信号项(0~1)（外部评估 D5/元宝 C4）。
+                # 仅移动决策消费此数组；signal_emit/pleasure_update 各自独立计算不受影响。
+                nb_max = float(self._nb_table.shape[1])
+                smw = self.config.simulation.social_move_weight
                 densities = np.bincount(
                     self._flat, minlength=self.world.n_cells
-                ).astype(np.float64)
+                ).astype(np.float64) / nb_max * smw
                 signal_marks = self.signals._marks.astype(np.uint8)
                 # 预生成随机选择（得分无差异时用），按移动个体顺序
                 rand_choice = self.rng.integers(
@@ -657,9 +662,14 @@ class SphereEngine:
                     self.resources._capacity, 1e-9
                 )
                 sig_present = (self.signals._marks > 0).astype(np.float64)
+                # D0 修复：群居项量纲归一化（按邻居上限 8 归一化 + 权重），
+                # 避免未归一化 bincount(0~8) 压过感知/信号项(0~1)（外部评估 D5/元宝 C4）。
+                # 仅移动决策消费此数组；signal_emit/pleasure_update 各自独立计算不受影响。
+                nb_max = float(self._nb_table.shape[1])
+                smw = self.config.simulation.social_move_weight
                 densities = np.bincount(
                     self._flat, minlength=self.world.n_cells
-                ).astype(np.float64)
+                ).astype(np.float64) / nb_max * smw
                 rand_choice = self.rng.integers(
                     0, 1_000_000, size=Nm, dtype=np.int64
                 )
