@@ -26,6 +26,7 @@ mod reproduction;
 mod signal;
 mod step_vectors;
 mod dispersal;
+mod light_temp;
 
 /// 基因位索引常量（与 Python simulation.genes 注册表对应），供绑定层对外导出
 // 说明：常量定义在 genes.rs（G_MOVE_PROB 等），这里仅 re-export 供 Python 侧
@@ -963,5 +964,6 @@ fn sim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eat_fruit, m)?)?;
     m.add_function(wrap_pyfunction!(native_gene_indicators, m)?)?;
     m.add_function(wrap_pyfunction!(validate_gene_wiring, m)?)?;
+    m.add_class::<light_temp::LightTempRust>()?;
     Ok(())
 }

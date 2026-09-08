@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""长实验脚本：支持自定义世界大小、密度控制、总tick数。
+
+设计要点：
+1. 每段结束立即 save_snapshot（防中途被杀丢数据）
+2. 每 RECORD_INTERVAL tick 立即追加一行统计到 CSV
+3. 快照存在则恢复，不存在则初始化新实验
+4. 密度控制：max_count = 格子数 × density_cap（默认45%，保证<50%）
+
+用法：
+    # 小世界100万tick
+    python3 experiments/run_long_experiment.py --rows 60 --cols 120 --ticks 1000000 --tag small
+
+    # 大世界100万tick
+    python3 experiments/run_long_experiment.py --rows 200 --cols 400 --ticks 1000000 --tag large
+"""
+import sys
+import os
+import time
+import csv
+import argparse
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import numpy as np
+from simulation.config import SimConfig
+from simulation.sphere_engine import SphereEngine
+
+RECORD_INTERVAL = 2000
+SEED = 42
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CSV_HEADER = ["tick", "N", "density", "sig_density", "g14", "g15", "g16", "g19",
+              "trust", "cult_div", "valence", "arousal", "pred_cum",
+              "total_energy", "rate", "elapsed_h", "max_gen"]
+
+
+def _append_row(row, output_path):
+    new_file = not os.path.exists(output_path)
+    with open(output_path, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new_file:
+            w.writerow(CSV_HEADER)
+        w.writerow(row)
+
+
+def _make_config(args):
+    cfg = SimConfig(seed=SEED)
+    cfg.world.rows = args.rows
+    cfg.world.cols = args.cols
+    n_cells = args.rows * args.cols
+    cfg.population.initial_count = args.initial
+    cfg.population.max_count = int(n_cells * args.density_cap)
+    cfg.resources.distribution = "patchy"
+    cfg.simulation.use_sim_core = True
+    return cfg
+
+
+def _stats(e, tick, rate, elapsed_h, pred_cum):
+    p = e.alive_count()
+    n_cells = e.world.n_cells
+    density = p / n_cells
+    g = e._genes[:p].mean(axis=0) if p > 0 else np.zeros(e.gene_count)
+    sig_density = int(e.signal_field.active_count()) if hasattr(e, 'signal_field') else 0
+    trust = float(e._trust[:p].mean()) if p > 0 and hasattr(e, '_trust') else 0.0
+    cult_div = float(e._interpret[:p].std()) if p > 0 and hasattr(e, '_interpret') else 0.0
+    valence = float(e._valence[:p].mean()) if p > 0 and hasattr(e, '_valence') else 0.0
+    arousal = float(e._arousal[:p].mean()) if p > 0 and hasattr(e, '_arousal') else 0.0
+    total_energy = float(e._energy[:p].sum()) if p > 0 else 0.0
+    max_gen = int(e._generation[:p].max()) if p > 0 else 0
+    return [tick, p, f"{density:.4f}", sig_density,
+            f"{g[14]:.4f}" if len(g) > 14 else "0",
+            f"{g[15]:.4f}" if len(g) > 15 else "0",
+            f"{g[16]:.4f}" if len(g) > 16 else "0",
+            f"{g[19]:.4f}" if len(g) > 19 else "0",
+            f"{trust:.4f}", f"{cult_div:.6f}",
+            f"{valence:.4f}", f"{arousal:.4f}",
+            f"{pred_cum:.0f}", f"{total_energy:.1f}",
+            f"{rate:.1f}", f"{elapsed_h:.4f}", max_gen]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rows", type=int, default=60)
+    parser.add_argument("--cols", type=int, default=120)
+    parser.add_argument("--ticks", type=int, default=1000000)
+    parser.add_argument("--initial", type=int, default=500)
+    parser.add_argument("--density-cap", type=float, default=0.45,
+                        help="种群上限占格子数比例（默认45%，保证<50%）")
+    parser.add_argument("--tag", type=str, default="exp",
+                        help="实验标签，用于命名快照和输出文件")
+    parser.add_argument("--segment", type=int, default=0,
+                        help="每段tick数，0表示一次性跑完（适合短实验）")
+    args = parser.parse_args()
+
+    n_cells = args.rows * args.cols
+    max_count = int(n_cells * args.density_cap)
+    snapshot_path = os.path.join(PROJECT_ROOT, f"snapshot_{args.tag}.npz")
+    output_path = os.path.join(PROJECT_ROOT, "experiments", f"long_{args.tag}.csv")
+
+    print(f"=== 长实验: {args.tag} ===")
+    print(f"世界: {args.rows}x{args.cols} = {n_cells}格")
+    print(f"种群: 初始={args.initial}, 上限={max_count} (密度={args.density_cap*100:.0f}%)")
+    print(f"目标: {args.ticks} tick")
+    print(f"快照: {snapshot_path}")
+    print(f"输出: {output_path}")
+
+    # 初始化或恢复
+    if os.path.exists(snapshot_path):
+        cfg = _make_config(args)
+        e = SphereEngine(cfg)
+        e.load_snapshot(snapshot_path)
+        start_tick = e.tick
+        print(f"从快照恢复: tick={start_tick}, N={e.alive_count()}")
+    else:
+        cfg = _make_config(args)
+        e = SphereEngine(cfg)
+        start_tick = 0
+        print(f"新实验初始化: N={e.alive_count()}")
+
+    # 从CSV恢复pred_cum
+    pred_cum = 0
+    if os.path.exists(output_path):
+        with open(output_path, "r") as f:
+            lines = f.readlines()
+            if len(lines) > 1:
+                last = lines[-1].strip().split(",")
+                pred_cum = float(last[12]) if len(last) > 12 else 0
+
+    t0 = time.time()
+    ticks_this_run = 0
+    segment_ticks = args.segment if args.segment > 0 else (args.ticks - start_tick)
+    target = min(start_tick + segment_ticks, args.ticks)
+
+    print(f"本次跑: {start_tick} -> {target} ({target-start_tick} tick)")
+
+    for tick in range(start_tick, target):
+        e.step()
+        ticks_this_run += 1
+
+        if (tick + 1) % RECORD_INTERVAL == 0:
+            elapsed = time.time() - t0
+            rate = ticks_this_run / elapsed if elapsed > 0 else 0
+            elapsed_h = elapsed / 3600
+            row = _stats(e, tick + 1, rate, elapsed_h, pred_cum)
+            _append_row(row, output_path)
+            print(f"  tick={tick+1}, N={e.alive_count()}, density={e.alive_count()/n_cells:.3f}, "
+                  f"rate={rate:.0f} tick/s, g15={row[5]}, max_gen={row[16]}")
+
+    # 段结束立即保存快照
+    e.save_snapshot(snapshot_path)
+    elapsed = time.time() - t0
+    rate = ticks_this_run / elapsed if elapsed > 0 else 0
+    print(f"\n=== 段完成 ===")
+    print(f"tick={e.tick}, N={e.alive_count()}, rate={rate:.0f} tick/s")
+    print(f"快照已保存: {snapshot_path}")
+
+    if e.tick >= args.ticks:
+        print(f"*** 实验完成: {args.ticks} tick ***")
+    else:
+        remaining = args.ticks - e.tick
+        eta_min = remaining / rate / 60 if rate > 0 else float('inf')
+        print(f"剩余: {remaining} tick, 预计还需 {eta_min:.1f} 分钟")
+
+
+if __name__ == "__main__":
+    main()

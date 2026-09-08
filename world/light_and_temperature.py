@@ -80,6 +80,10 @@ class LightAndTemperature:
         "_pre_lat_term",
         "_lat_term_is_cos",
         "_pre_col_rad",
+        # Rust 加速版
+        "_rust_lt",
+        "_rust_illum",
+        "_rust_temp",
     )
 
     def __init__(
@@ -142,14 +146,26 @@ class LightAndTemperature:
             self._pre_lat_term = np.power(self._pre_cos_lat, self.lat_base_ref)
         # 预计算每列经度弧度
         self._pre_col_rad = all_cols / self.world.cols * (2.0 * np.pi)
+        # Rust 加速版（可用时自动启用，大世界加速 2x+）
+        self._rust_lt = None
+        try:
+            import sim_core
+            self._rust_lt = sim_core.LightTempRust(
+                self.world.n_cells, self._pre_cos_lat, self._pre_col_rad,
+                self.t_equator, self.t_pole, self.day_boost,
+                float(self.rotation_period),
+            )
+            self._rust_illum = np.zeros(self.world.n_cells, dtype=np.float64)
+            self._rust_temp = np.zeros(self.world.n_cells, dtype=np.float64)
+        except (ImportError, AttributeError):
+            pass
 
     # ---- 缓存（每 tick 只算一次全格） ------------------------------------
 
     def _ensure_cache(self, tick: int) -> None:
         """确保当前 tick 的全格光照/温度缓存已计算。每 tick 只算一次。
 
-        优化：使用预计算的 cos_lat/行列索引表，避免每 tick 重复 flat_to_rc 和 np.cos。
-        lat_base_ref=1.0 时直接跳过 np.power（最常见配置）。
+        优先使用 Rust+Rayon 版（大世界加速 2x+），不可用时回退 Python numpy。
         """
         if self._cache_tick == tick:
             return
@@ -158,17 +174,21 @@ class LightAndTemperature:
         if self._cache_base_all is None:
             self._cache_base_all = self.t_pole + (self.t_equator - self.t_pole) * self._pre_cos_lat
 
-        # 纬度项（lat_base_ref=1.0 时 = cos_lat，无需 power）
-        lat_term = self._pre_cos_lat if self._lat_term_is_cos else self._pre_lat_term
+        if self._rust_lt is not None:
+            # Rust+Rayon 版（就地写入 _rust_illum/_rust_temp）
+            self._rust_lt.compute(tick, self._rust_illum, self._rust_temp)
+            self._cache_illum_all = self._rust_illum
+            self._cache_temp_all = self._rust_temp
+        else:
+            # Python numpy 回退
+            lat_term = self._pre_cos_lat if self._lat_term_is_cos else self._pre_lat_term
+            sun_lon = self.sun_longitude(tick)
+            lon_diff = self._pre_col_rad - sun_lon
+            lon_diff = (lon_diff + np.pi) % (2.0 * np.pi) - np.pi
+            day_term = np.maximum(0.0, np.cos(lon_diff))
+            self._cache_illum_all = lat_term * day_term
+            self._cache_temp_all = self._cache_base_all + self._cache_illum_all * self.day_boost
 
-        # 经度项（昼夜）：使用预计算的列弧度
-        sun_lon = self.sun_longitude(tick)
-        lon_diff = self._pre_col_rad - sun_lon
-        lon_diff = (lon_diff + np.pi) % (2.0 * np.pi) - np.pi
-        day_term = np.maximum(0.0, np.cos(lon_diff))
-
-        self._cache_illum_all = lat_term * day_term
-        self._cache_temp_all = self._cache_base_all + self._cache_illum_all * self.day_boost
         self._cache_tick = tick
 
     # ---- 光照 --------------------------------------------------------------
