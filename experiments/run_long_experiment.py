@@ -107,9 +107,8 @@ def main():
 
     # 初始化或恢复
     if os.path.exists(snapshot_path):
-        cfg = _make_config(args)
-        e = SphereEngine(cfg)
-        e.load_snapshot(snapshot_path)
+        # load_snapshot 是 classmethod，返回新实例
+        e = SphereEngine.load_snapshot(snapshot_path)
         start_tick = e.tick
         print(f"从快照恢复: tick={start_tick}, N={e.alive_count()}")
     else:
