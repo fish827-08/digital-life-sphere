@@ -1,0 +1,134 @@
+{
+  "signal_vocabulary": {
+    "total_signals": 7200,
+    "unique_patterns": 5,
+    "entropy": 1.480511,
+    "normalized_entropy": 0.533981,
+    "zipf_r2": 0.703945,
+    "zipf_slope": -0.9299,
+    "freq_by_pattern": [
+      0.18,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.311806,
+      0.054722,
+      0.299028,
+      0.154444
+    ]
+  },
+  "cultural_diversity": {
+    "overall_std": 0.000844,
+    "per_pattern_std": [
+      0.000676,
+      0.000676,
+      0.000525,
+      0.000808,
+      0.000157,
+      0.001763,
+      0.00071,
+      0.001562,
+      0.001409,
+      0.001155,
+      0.001516,
+      0.000321,
+      0.000632,
+      0.000536,
+      0.001014,
+      4.5e-05
+    ],
+    "interpretation_range": 0.879399,
+    "total_variance": 1.5e-05,
+    "converged_patterns": 16
+  },
+  "generational_stability": {
+    "avg_correlation": 1.0,
+    "generation_pairs": 1,
+    "per_gen_corr": {
+      "33->34": 1.0
+    },
+    "stable_generations": 1
+  },
+  "spatial_clustering": {
+    "morans_i": 0.170895,
+    "same_neighbor_ratio": 0.434137,
+    "expected_same_random": 0.317501,
+    "active_cells": 5904,
+    "neighbor_pairs": 10241
+  },
+  "signal_context_mi": {
+    "mutual_information": 0.0,
+    "normalized_mi": 0.0,
+    "context_bins": 3,
+    "active_signals": 5904
+  },
+  "interpretation_consistency": {
+    "consistency_score": 0.997187,
+    "dominant_interpretation_ratio": 0.999963,
+    "per_pattern_consistency": [
+      0.997747,
+      0.997747,
+      0.998251,
+      0.997307,
+      0.999477,
+      0.994124,
+      0.997634,
+      0.994792,
+      0.995304,
+      0.99615,
+      0.994945,
+      0.998929,
+      0.997894,
+      0.998215,
+      0.996621,
+      0.999849
+    ],
+    "g14_interpret_diversity_corr": 0.009911
+  },
+  "signal_genotype_phenotype": {
+    "g15_mean": 0.374517,
+    "g15_signal_corr": 0.045487,
+    "high_g15_fraction": 0.3018,
+    "high_g15_signal_rate": 1.0,
+    "low_g15_signal_rate": 0.997708,
+    "signal_rate_diff": 0.002292
+  },
+  "language_emergence_score": {
+    "total_score": 56.94,
+    "subscores": {
+      "vocabulary_richness": 0.7628,
+      "zipf_structure": 0.7039,
+      "cultural_diversity": 0.0084,
+      "generational_stability": 1.0,
+      "spatial_clustering": 0.3418,
+      "signal_context_mi": 0,
+      "interpretation_consistency": 0.9972
+    },
+    "weights": {
+      "vocabulary": 0.15,
+      "zipf_structure": 0.1,
+      "cultural_diversity": 0.1,
+      "generational_stability": 0.2,
+      "spatial_clustering": 0.1,
+      "signal_context_mi": 0.2,
+      "interpretation_consistency": 0.15
+    },
+    "interpretation": "无语言迹象：信号基本是随机或单一的，无共享语义"
+  },
+  "meta": {
+    "snapshot": "snapshot.npz",
+    "tick": 602000,
+    "alive_count": 5000,
+    "max_generation": 34,
+    "n_cells": 7200,
+    "grid": "60x120"
+  }
+}
