@@ -86,7 +86,7 @@ def main():
     parser.add_argument("--ticks", type=int, default=1000000)
     parser.add_argument("--initial", type=int, default=500)
     parser.add_argument("--density-cap", type=float, default=0.45,
-                        help="种群上限占格子数比例（默认45%，保证<50%）")
+                        help="种群上限占格子数比例（默认45%%，保证小于50%%）")
     parser.add_argument("--tag", type=str, default="exp",
                         help="实验标签，用于命名快照和输出文件")
     parser.add_argument("--segment", type=int, default=0,
