@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "tag": "gen_rp1200",
+    "rows": 60,
+    "cols": 120,
+    "ticks": 200000,
+    "segment": 50000,
+    "density_cap": 0.45,
+    "rotation_period": 1200,
+    "seeds": [
+      42,
+      43
+    ],
+    "commit": "77c7846",
+    "time": "2026-09-09 02:20:08",
+    "interpreter": "/sandboxdata/workspace/file/digital-life-sphere/.venv/bin/python"
+  },
+  "per_seed": [
+    {
+      "seed": 42,
+      "wall_s": 869.1,
+      "rc": 0,
+      "csv": "experiments/long_gen_rp1200_s42.csv",
+      "N": 3240.0,
+      "g14": 0.4608,
+      "g15": 0.2169,
+      "g16": 0.3238,
+      "g19": 0.7631,
+      "trust": 0.8752,
+      "cult_div": 0.003294,
+      "max_gen": 23.0,
+      "sig_density": 2772.0,
+      "tick": 200000.0
+    },
+    {
+      "seed": 43,
+      "wall_s": 875.0,
+      "rc": 0,
+      "csv": "experiments/long_gen_rp1200_s43.csv",
+      "N": 3239.0,
+      "g14": 0.5,
+      "g15": 0.5416,
+      "g16": 0.4664,
+      "g19": 0.4469,
+      "trust": 0.9744,
+      "cult_div": 0.013777,
+      "max_gen": 23.0,
+      "sig_density": 2666.0,
+      "tick": 200000.0
+    }
+  ],
+  "stats": {
+    "n_seeds": 2,
+    "N_mean": 3239.5,
+    "N_std": 0.7071,
+    "g14_mean": 0.4804,
+    "g14_std": 0.0277,
+    "g15_mean": 0.3792,
+    "g15_std": 0.2296,
+    "g16_mean": 0.3951,
+    "g16_std": 0.1008,
+    "g19_mean": 0.605,
+    "g19_std": 0.2236,
+    "trust_mean": 0.9248,
+    "trust_std": 0.0701,
+    "cult_div_mean": 0.0085,
+    "cult_div_std": 0.0074,
+    "max_gen_mean": 23.0,
+    "max_gen_std": 0.0,
+    "sig_density_mean": 2719.0,
+    "sig_density_std": 74.9533,
+    "tick_mean": 200000.0,
+    "tick_std": 0.0
+  }
+}
