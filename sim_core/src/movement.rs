@@ -72,9 +72,9 @@ pub fn step_movement(
         let trust_val = trust[idx];
 
         // 收集有效邻居（>=0），同时计算得分
-        // 极点格最多 cols 个邻居（≤120），用 128 固定数组避免堆分配
-        let mut valid_nb: [i64; 128] = [-1; 128];
-        let mut scores: [f64; 128] = [0.0; 128];
+        // 极点格最多 cols 个邻居，用 Vec 动态分配避免大世界越界
+        let mut valid_nb: Vec<i64> = Vec::with_capacity(nb_stride);
+        let mut scores: Vec<f64> = Vec::with_capacity(nb_stride);
         let mut n_valid = 0usize;
 
         let nb_base = c * nb_stride;
@@ -87,7 +87,7 @@ pub fn step_movement(
             if nbc >= n_cells {
                 continue;
             }
-            valid_nb[n_valid] = nbc as i64;
+            valid_nb.push(nbc as i64);
 
             // 基础得分：感知×(食物×0.5 + 信号×0.5×信任) + 群居×密度
             let mut s = perc * (food_ratio[nbc] * 0.5 + sig_present[nbc] * 0.5 * trust_val)
@@ -110,7 +110,7 @@ pub fn step_movement(
                 s += 0.4 * perc * interp_val;
             }
 
-            scores[n_valid] = s;
+            scores.push(s);
             n_valid += 1;
         }
 

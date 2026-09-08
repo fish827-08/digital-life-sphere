@@ -67,6 +67,19 @@ class LightAndTemperature:
         "t_pole",
         "day_boost",
         "_daily_cos",
+        # 每 tick 缓存：光照温度只依赖 tick，不依赖种群状态，
+        # 每 tick 内重复调用 8+ 次，缓存可减少 80%+ 计算量。
+        "_cache_tick",
+        "_cache_illum_all",
+        "_cache_temp_all",
+        "_cache_base_all",
+        # 预计算表（永久不变）
+        "_pre_rows",
+        "_pre_cols",
+        "_pre_cos_lat",
+        "_pre_lat_term",
+        "_lat_term_is_cos",
+        "_pre_col_rad",
     )
 
     def __init__(
@@ -112,6 +125,51 @@ class LightAndTemperature:
         col_rad = np.linspace(0.0, 2.0 * np.pi, self.world.cols, endpoint=False)
         # 经度差从 0（对太阳）向 π 变化，cos → 光照衰减（后面按 tick 平移）
         self._daily_cos = np.cos(col_rad)
+        # 缓存初始化
+        self._cache_tick = -1
+        self._cache_illum_all = None
+        self._cache_temp_all = None
+        self._cache_base_all = None
+        # 预计算：全格 cos(纬度)（永久不变，避免每 tick 重复算）
+        all_flat = np.arange(self.world.n_cells, dtype=np.int64)
+        all_rows, all_cols = self.world.flat_to_rc(all_flat)
+        self._pre_rows = all_rows
+        self._pre_cols = all_cols
+        self._pre_cos_lat = np.cos(self.world.latitude_of(all_rows))
+        # lat_base_ref=1.0 时 lat_term = cos_lat，无需 power
+        self._lat_term_is_cos = abs(self.lat_base_ref - 1.0) < 1e-12
+        if not self._lat_term_is_cos:
+            self._pre_lat_term = np.power(self._pre_cos_lat, self.lat_base_ref)
+        # 预计算每列经度弧度
+        self._pre_col_rad = all_cols / self.world.cols * (2.0 * np.pi)
+
+    # ---- 缓存（每 tick 只算一次全格） ------------------------------------
+
+    def _ensure_cache(self, tick: int) -> None:
+        """确保当前 tick 的全格光照/温度缓存已计算。每 tick 只算一次。
+
+        优化：使用预计算的 cos_lat/行列索引表，避免每 tick 重复 flat_to_rc 和 np.cos。
+        lat_base_ref=1.0 时直接跳过 np.power（最常见配置）。
+        """
+        if self._cache_tick == tick:
+            return
+
+        # 基温（永久缓存，只算一次）
+        if self._cache_base_all is None:
+            self._cache_base_all = self.t_pole + (self.t_equator - self.t_pole) * self._pre_cos_lat
+
+        # 纬度项（lat_base_ref=1.0 时 = cos_lat，无需 power）
+        lat_term = self._pre_cos_lat if self._lat_term_is_cos else self._pre_lat_term
+
+        # 经度项（昼夜）：使用预计算的列弧度
+        sun_lon = self.sun_longitude(tick)
+        lon_diff = self._pre_col_rad - sun_lon
+        lon_diff = (lon_diff + np.pi) % (2.0 * np.pi) - np.pi
+        day_term = np.maximum(0.0, np.cos(lon_diff))
+
+        self._cache_illum_all = lat_term * day_term
+        self._cache_temp_all = self._cache_base_all + self._cache_illum_all * self.day_boost
+        self._cache_tick = tick
 
     # ---- 光照 --------------------------------------------------------------
 
@@ -133,40 +191,17 @@ class LightAndTemperature:
     def illumination(self, flat, tick: int) -> np.ndarray:
         """计算格子光照强度（0=全黑，1=正午对日）。
 
-        光照 = cos(纬度)^lat_base_ref × max(0, cos(经度差))。
-        - 纬度项：赤道最大、极地→0（极地天然近极夜，昼夜差异小）；
-        - 经度项：格子经度与太阳子午线越接近照度越高，
-          背对太阳（经度差>90°）被截断为 0 → 产生日落后的黑夜。
-
-        参数
-        ----
-        flat : int 或 NDArray[int64]
-            平铺索引（支持标量或数组批量查询）。
-        tick : int
-            当前时间步（决定太阳子午线位置）。
-
-        返回
-        ----
-        NDArray[float64] : 与入参同形状的光照强度，范围 [0, 1]。
+        优化：全格查询返回每 tick 缓存；子集查询从缓存中索引（O(N) 查表 vs O(N) 重算）。
         """
         flat = np.asarray(flat, dtype=np.int64)
         scalar = flat.ndim == 0
         flat = flat.reshape(-1)
-        rows, cols = self.world.flat_to_rc(flat)
 
-        # 纬度项（极地弱）
-        cos_lat = np.cos(self.world.latitude_of(rows))
-        lat_term = np.power(cos_lat, self.lat_base_ref)  # 形状 (N,)
+        # 确保缓存已计算（全格）
+        self._ensure_cache(tick)
 
-        # 经度项（昼夜）：太阳子午线经度 - 本格经度，cos 光照
-        sun_lon = self.sun_longitude(tick)
-        col_rad = cols / self.world.cols * (2.0 * np.pi)  # 本格经度（弧度）
-        lon_diff = col_rad - sun_lon
-        # 对齐到 [-π, π) 使 cos 单调衰减
-        lon_diff = (lon_diff + np.pi) % (2.0 * np.pi) - np.pi
-        day_term = np.maximum(0.0, np.cos(lon_diff))  # 反面截断为 0 → 夜
-
-        out = np.asarray(lat_term * day_term)
+        # 从全格缓存中索引（无论是全格还是子集，都走这条路）
+        out = self._cache_illum_all[flat]
         return out.item(0) if scalar else out
 
     # ---- 温度 --------------------------------------------------------------
@@ -174,50 +209,30 @@ class LightAndTemperature:
     def base_temperature(self, flat) -> np.ndarray:
         """计算纬度基温（无昼夜影响，仅随纬度变化）。
 
-        基温 = t_pole + (t_equator - t_pole) × cos(纬度)。
-        赤道 → t_equator；极点 → t_pole；单调递减，无拐点。
-
-        参数
-        ----
-        flat : int 或 NDArray[int64]
-            平铺索引（支持标量或数组批量查询）。
-
-        返回
-        ----
-        NDArray[float64] : 与入参同形状的基温（抽象温度单位）。
+        优化：基温不依赖 tick，全格永久缓存；子集查询从缓存索引。
         """
         flat = np.asarray(flat, dtype=np.int64)
         scalar = flat.ndim == 0
         flat = flat.reshape(-1)
-        rows, _ = self.world.flat_to_rc(flat)
-        cos_lat = np.cos(self.world.latitude_of(rows))
-        out = np.asarray(self.t_pole + (self.t_equator - self.t_pole) * cos_lat)
+
+        # 确保基温缓存已计算
+        if self._cache_base_all is None:
+            self._cache_base_all = self.t_pole + (self.t_equator - self.t_pole) * self._pre_cos_lat
+
+        out = self._cache_base_all[flat]
         return out.item(0) if scalar else out
 
     def temperature(self, flat, tick: int) -> np.ndarray:
         """计算当前时刻的实时温度（基温 + 昼夜微调）。
 
-        实时温度 = 基温 + 光照 × day_boost。
-        昼夜项随光照正比：正午最高（基温+day_boost），深夜最低（≈基温，
-        因光照被截断为 0）。因 day_boost 取小，夜晚只比白天低一点。
-
-        参数
-        ----
-        flat : int 或 NDArray[int64]
-            平铺索引（支持标量或数组批量查询）。
-        tick : int
-            当前时间步（决定光照 → 昼夜温差项）。
-
-        返回
-        ----
-        NDArray[float64] : 与入参同形状的实时温度。
+        优化：全格缓存 + 子集查询从缓存索引。
         """
         flat = np.asarray(flat, dtype=np.int64)
         scalar = flat.ndim == 0
         flat = flat.reshape(-1)
-        base = self.base_temperature(flat)
-        illum = self.illumination(flat, tick)
-        out = np.asarray(base) + np.asarray(illum) * self.day_boost
+
+        self._ensure_cache(tick)
+        out = self._cache_temp_all[flat]
         return out.item(0) if scalar else out
 
     # ---- 活性（生物响应） ---------------------------------------------------
