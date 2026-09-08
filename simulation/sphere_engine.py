@@ -556,11 +556,15 @@ class SphereEngine:
         #     模式 = 状态哈希（能量2位 + 食物1位 + 邻居1位 = 4位=16种）
         #     use_sim_core=True：下沉到 Rust signal_emit（L7a C1），
         #     rand_emit 在 Python 侧预生成，保证 RNG 消费顺序与纯 Python 一致。
+        #     S0 优化：本 tick 移动前的位置占用只算一次（occ），信号段（4.5）
+        #     与移动段（5）共用；此段 _flat 尚未变化（移动在步骤 5），len(_flat)==P，
+        #     语义与各调用点原 np.bincount(self._flat[:P]) 逐位一致。
+        occ = np.bincount(self._flat[:P], minlength=self.world.n_cells)
         signal_gene = genes[:, Gene.SIGNAL_STRENGTH]
         rand_emit = self.rng.random(P)  # 双路径共用：Python 直接用，Rust 传入
         if self._use_sim_core:
             SIGNAL_COST = 0.1
-            dens = np.bincount(self._flat[:P], minlength=self.world.n_cells).astype(np.float64)
+            dens = occ.astype(np.float64)
             self._sim_core.signal_emit(
                 self._flat[:P], energy, signal_gene.copy(), rand_emit,
                 dens, self.resources._grid, self.resources._capacity,
@@ -584,8 +588,7 @@ class SphereEngine:
                         self.resources._grid[e_flat]
                         > 0.5 * self.resources._capacity[e_flat]
                     ).astype(np.int64)
-                    dens = np.bincount(self._flat[:P], minlength=self.world.n_cells)
-                    n_bit = (dens[e_flat] > 1).astype(np.int64)
+                    n_bit = (occ[e_flat] > 1).astype(np.int64)
                     patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
                     self.signals.write_many(e_flat, patterns)
 
@@ -621,11 +624,10 @@ class SphereEngine:
                 # D0 修复：群居项量纲归一化（按邻居上限 8 归一化 + 权重），
                 # 避免未归一化 bincount(0~8) 压过感知/信号项(0~1)（外部评估 D5/元宝 C4）。
                 # 仅移动决策消费此数组；signal_emit/pleasure_update 各自独立计算不受影响。
+                # S0：occupancy 复用信号段预计算的 occ（移动之前位置未变）。
                 nb_max = float(self._nb_table.shape[1])
                 smw = self.config.simulation.social_move_weight
-                densities = np.bincount(
-                    self._flat, minlength=self.world.n_cells
-                ).astype(np.float64) / nb_max * smw
+                densities = occ.astype(np.float64) / nb_max * smw
                 signal_marks = self.signals._marks.astype(np.uint8)
                 # 预生成随机选择（得分无差异时用），按移动个体顺序
                 rand_choice = self.rng.integers(
@@ -665,11 +667,10 @@ class SphereEngine:
                 # D0 修复：群居项量纲归一化（按邻居上限 8 归一化 + 权重），
                 # 避免未归一化 bincount(0~8) 压过感知/信号项(0~1)（外部评估 D5/元宝 C4）。
                 # 仅移动决策消费此数组；signal_emit/pleasure_update 各自独立计算不受影响。
+                # S0：occupancy 复用信号段预计算的 occ（移动之前位置未变）。
                 nb_max = float(self._nb_table.shape[1])
                 smw = self.config.simulation.social_move_weight
-                densities = np.bincount(
-                    self._flat, minlength=self.world.n_cells
-                ).astype(np.float64) / nb_max * smw
+                densities = occ.astype(np.float64) / nb_max * smw
                 rand_choice = self.rng.integers(
                     0, 1_000_000, size=Nm, dtype=np.int64
                 )
