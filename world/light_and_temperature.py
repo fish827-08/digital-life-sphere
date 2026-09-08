@@ -67,16 +67,21 @@ class LightAndTemperature:
         "t_pole",
         "day_boost",
         "_daily_cos",
-        # 每 tick 缓存：光照温度只依赖 tick，不依赖种群状态，
-        # 每 tick 内重复调用 8+ 次，缓存可减少 80%+ 计算量。
+        # 季节系统（L 季节）：太阳直射点随季节摆动，冬季半球资源贫瘠
+        "_season_enabled",
+        "_axial_tilt",
+        "_year_ticks",
+        # 每 tick 缓存
         "_cache_tick",
         "_cache_illum_all",
         "_cache_temp_all",
         "_cache_base_all",
+        "_cache_season_factor",
         # 预计算表（永久不变）
         "_pre_rows",
         "_pre_cols",
         "_pre_cos_lat",
+        "_pre_lat_rad",
         "_pre_lat_term",
         "_lat_term_is_cos",
         "_pre_col_rad",
@@ -94,6 +99,9 @@ class LightAndTemperature:
         t_pole: float = -20.0,
         day_boost: float = 6.0,
         lat_base_ref: float = 1.0,
+        season_enabled: bool = False,
+        axial_tilt: float = 0.4,
+        year_length: int = 30,
     ) -> None:
         """构造光照温度场。
 
@@ -125,6 +133,10 @@ class LightAndTemperature:
         self.t_equator = float(t_equator)
         self.t_pole = float(t_pole)
         self.day_boost = float(day_boost)
+        # 季节系统（太阳直射点随季节摆动，冬季半球资源贫瘠）
+        self._season_enabled = bool(season_enabled)
+        self._axial_tilt = float(axial_tilt)
+        self._year_ticks = int(year_length) * int(rotation_period)
         # 日变化预计算：经度差 ∈ [-π, π)，cos 为此时各地相对太阳的角度
         col_rad = np.linspace(0.0, 2.0 * np.pi, self.world.cols, endpoint=False)
         # 经度差从 0（对太阳）向 π 变化，cos → 光照衰减（后面按 tick 平移）
@@ -134,31 +146,34 @@ class LightAndTemperature:
         self._cache_illum_all = None
         self._cache_temp_all = None
         self._cache_base_all = None
-        # 预计算：全格 cos(纬度)（永久不变，避免每 tick 重复算）
+        self._cache_season_factor = None
+        # 预计算：全格纬度弧度、cos(纬度)（永久不变，避免每 tick 重复算）
         all_flat = np.arange(self.world.n_cells, dtype=np.int64)
         all_rows, all_cols = self.world.flat_to_rc(all_flat)
         self._pre_rows = all_rows
         self._pre_cols = all_cols
-        self._pre_cos_lat = np.cos(self.world.latitude_of(all_rows))
+        self._pre_lat_rad = self.world.latitude_of(all_rows)
+        self._pre_cos_lat = np.cos(self._pre_lat_rad)
         # lat_base_ref=1.0 时 lat_term = cos_lat，无需 power
         self._lat_term_is_cos = abs(self.lat_base_ref - 1.0) < 1e-12
         if not self._lat_term_is_cos:
             self._pre_lat_term = np.power(self._pre_cos_lat, self.lat_base_ref)
         # 预计算每列经度弧度
         self._pre_col_rad = all_cols / self.world.cols * (2.0 * np.pi)
-        # Rust 加速版（可用时自动启用，大世界加速 2x+）
+        # Rust 加速版（季节启用时不使用，因为 Rust 版不支持季节参数）
         self._rust_lt = None
-        try:
-            import sim_core
-            self._rust_lt = sim_core.LightTempRust(
-                self.world.n_cells, self._pre_cos_lat, self._pre_col_rad,
-                self.t_equator, self.t_pole, self.day_boost,
-                float(self.rotation_period),
-            )
-            self._rust_illum = np.zeros(self.world.n_cells, dtype=np.float64)
-            self._rust_temp = np.zeros(self.world.n_cells, dtype=np.float64)
-        except (ImportError, AttributeError):
-            pass
+        if not self._season_enabled:
+            try:
+                import sim_core
+                self._rust_lt = sim_core.LightTempRust(
+                    self.world.n_cells, self._pre_cos_lat, self._pre_col_rad,
+                    self.t_equator, self.t_pole, self.day_boost,
+                    float(self.rotation_period),
+                )
+                self._rust_illum = np.zeros(self.world.n_cells, dtype=np.float64)
+                self._rust_temp = np.zeros(self.world.n_cells, dtype=np.float64)
+            except (ImportError, AttributeError):
+                pass
 
     # ---- 缓存（每 tick 只算一次全格） ------------------------------------
 
@@ -181,7 +196,25 @@ class LightAndTemperature:
             self._cache_temp_all = self._rust_temp
         else:
             # Python numpy 回退
-            lat_term = self._pre_cos_lat if self._lat_term_is_cos else self._pre_lat_term
+            if self._season_enabled:
+                # 季节版：太阳直射纬度随季节摆动，光照 = cos(纬度 - sun_lat) × day_term
+                sun_lat = self.sun_latitude(tick)
+                rel_lat = self._pre_lat_rad - sun_lat
+                cos_rel_lat = np.cos(rel_lat)
+                lat_term = (
+                    cos_rel_lat if self._lat_term_is_cos
+                    else np.power(cos_rel_lat, self.lat_base_ref)
+                )
+                # 季节因子 = 当前光照 / 无季节光照（clip 到 [winter_floor, 1.0]，只削弱冬季不增强夏季）
+                season_ratio = np.where(
+                    self._pre_cos_lat > 1e-9,
+                    cos_rel_lat / np.maximum(self._pre_cos_lat, 1e-9),
+                    1.0,
+                )
+                self._cache_season_factor = np.clip(season_ratio, 0.3, 1.0)
+            else:
+                lat_term = self._pre_cos_lat if self._lat_term_is_cos else self._pre_lat_term
+                self._cache_season_factor = np.ones(self.world.n_cells, dtype=np.float64)
             sun_lon = self.sun_longitude(tick)
             lon_diff = self._pre_col_rad - sun_lon
             lon_diff = (lon_diff + np.pi) % (2.0 * np.pi) - np.pi
@@ -207,6 +240,27 @@ class LightAndTemperature:
         """
         phase = (tick % self.rotation_period) / self.rotation_period
         return phase * 2.0 * np.pi
+
+    def sun_latitude(self, tick: int) -> float:
+        """计算给定 tick 时刻太阳直射纬度（弧度，-axial_tilt..+axial_tilt）。
+
+        季节系统核心：太阳直射点随季节在南北纬之间摆动。
+        一年 = year_length × rotation_period tick，相位 = tick / year_ticks。
+        春分（tick=0）太阳直射赤道→夏至直射北回归线→秋分赤道→冬至南回归线。
+        """
+        if not self._season_enabled:
+            return 0.0
+        phase = (tick % self._year_ticks) / self._year_ticks
+        return self._axial_tilt * np.sin(phase * 2.0 * np.pi)
+
+    def season_factor(self, tick: int) -> np.ndarray:
+        """返回每格的季节因子（0.3..1.0），冬季半球<1，夏季半球=1。
+
+        用于资源再生和植物光合的季节调节：冬季半球 × season_factor。
+        只削弱冬季，不增强夏季（保持能量守恒）。
+        """
+        self._ensure_cache(tick)
+        return self._cache_season_factor.copy()
 
     def illumination(self, flat, tick: int) -> np.ndarray:
         """计算格子光照强度（0=全黑，1=正午对日）。

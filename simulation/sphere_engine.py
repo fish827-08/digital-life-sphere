@@ -47,6 +47,7 @@ from world.light_and_temperature import LightAndTemperature
 from world.resource_field import ResourceField
 from world.signal_field import SignalField
 from world.sphere_world import SphereWorld
+from world.terrain import TerrainField
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ class SphereEngine:
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
         "_fruit_grid", "_fruit_charge", "_seed_carried",  # L10a
+        "_carcass", "_terrain",  # L9 尸体 + L8 地形
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -128,7 +130,13 @@ class SphereEngine:
         self.config = config
         self.rng = np.random.default_rng(config.seed)
         # 模块三：use_sim_core=True 时把种群数值管线下沉到 Rust（sim_core）
+        # 注意：L9 尸体 / L8 地形 / 季节系统启用时，Rust 路径暂不支持，自动回退 Python
         self._use_sim_core = config.simulation.use_sim_core
+        eco_enabled = (
+            config.carcass.enabled or config.terrain.enabled or config.season.enabled
+        )
+        if self._use_sim_core and eco_enabled:
+            self._use_sim_core = False
         if self._use_sim_core:
             try:
                 import sim_core  # 本地扩展，运行时注入
@@ -167,6 +175,9 @@ class SphereEngine:
             t_pole=config.light.t_pole,
             day_boost=config.light.day_boost,
             lat_base_ref=config.light.lat_base_ref,
+            season_enabled=config.season.enabled,
+            axial_tilt=config.season.axial_tilt,
+            year_length=config.season.year_length,
         )
         self.resources = ResourceField(
             self.world, self.light,
@@ -185,6 +196,27 @@ class SphereEngine:
         )
         # 田字格信号场（L2/L3）：生物可写入/读取 16 种标记模式
         self.signals = SignalField(self.world, duration=50)
+
+        # L8 地形系统（简化版）：水域不可通行，山地移动能耗高
+        tcfg = config.terrain
+        if tcfg.enabled:
+            self._terrain = TerrainField(
+                self.world,
+                water_ratio=tcfg.water_ratio,
+                mountain_ratio=tcfg.mountain_ratio,
+                mountain_move_mult=tcfg.mountain_move_mult,
+                mountain_regrow_mult=tcfg.mountain_regrow_mult,
+                water_pole_bias=tcfg.water_pole_bias,
+                seed=config.seed + 7,  # 独立种子，不消费引擎 rng
+            )
+        else:
+            self._terrain = None
+
+        # L9 尸体能量守恒：死亡生物量转化为尸体→食腐→分解→资源
+        if config.carcass.enabled:
+            self._carcass = np.zeros(self.world.n_cells, dtype=np.float64)
+        else:
+            self._carcass = None
 
         # 预计算统一邻居表（L6 Rust 下沉用）：普通格 8 邻，极点格 cols 邻，
         # 统一到 nb_stride 列，未用位置填 -1。世界不变，只需构建一次。
@@ -244,10 +276,16 @@ class SphereEngine:
         self._fruit_charge = np.zeros(n, dtype=np.float64)  # 每植物的果实蓄力
         self._seed_carried = np.zeros(n, dtype=np.int32)  # 每动物携带种子数（L10b 完善）
 
-        # 出生位置：均匀随机格（不做地形障碍过滤，球面无障碍）
-        self._flat = self.rng.integers(0, self.world.n_cells, size=n).astype(
-            np.int64
-        )
+        # 出生位置：均匀随机格（地形启用时只在可通行格出生）
+        if self._terrain is not None:
+            passable_cells = np.where(self._terrain.passable)[0]
+            self._flat = self.rng.choice(passable_cells, size=n, replace=True).astype(
+                np.int64
+            )
+        else:
+            self._flat = self.rng.integers(0, self.world.n_cells, size=n).astype(
+                np.int64
+            )
 
         self._tick = 0
         self._extinct = False
@@ -350,7 +388,26 @@ class SphereEngine:
                 self.resources.temp_sensitivity,
             )
         else:
-            self.resources.regrow(self._tick)
+            # Python 路径：季节/地形启用时传入额外再生倍率
+            extra_mult = None
+            if self.config.season.enabled or self._terrain is not None:
+                extra_mult = np.ones(self.world.n_cells, dtype=np.float64)
+                if self.config.season.enabled:
+                    extra_mult *= self.light.season_factor(self._tick)
+                if self._terrain is not None:
+                    extra_mult *= self._terrain.regrow_mult
+            self.resources.regrow(self._tick, extra_mult=extra_mult)
+        # L9 尸体分解：每 tick 尸体自然分解，部分转化为食物资源
+        if self._carcass is not None:
+            carc_cfg = self.config.carcass
+            decompose = self._carcass * carc_cfg.decomposition_rate
+            self._carcass -= decompose
+            to_resource = decompose * carc_cfg.resource_conversion
+            np.minimum(
+                self.resources._capacity,
+                self.resources._grid + to_resource,
+                out=self.resources._grid,
+            )
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
         born, died, deaths = self._step_population()
@@ -452,10 +509,13 @@ class SphereEngine:
             )
         else:
             # 1) 光合收入（g8）：少量、随光照。
-            #    收入 = 光照(所在格,当前tick) × g8 × photo_max。
-            #    植物化增强（g19）在 stage1 之后统一补，确保双路径一致。
+            #    收入 = 光照(所在格,当前tick) × g8 × photo_max × 季节因子（冬季半球降低）。
+            photo_illum = self.light.illumination(self._flat, self._tick)
+            if self.config.season.enabled:
+                sf = self.light.season_factor(self._tick)
+                photo_illum = photo_illum * sf[self._flat]
             energy += (
-                self.light.illumination(self._flat, self._tick)
+                photo_illum
                 * genes[:, Gene.PHOTOSYNTHESIS]
                 * ocfg.photo_max
             )
@@ -486,9 +546,12 @@ class SphereEngine:
             energy -= ocfg.homeo_upkeep * homeo
 
         # 3.5) 植物化光合增强（g19）：统一在 stage1 之后补，确保 Rust/Python 双路径一致
-        #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入
+        #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入（×季节因子）
+        plant_illum = self.light.illumination(self._flat, self._tick)
+        if self.config.season.enabled:
+            plant_illum = plant_illum * self.light.season_factor(self._tick)[self._flat]
         energy += (
-            self.light.illumination(self._flat, self._tick)
+            plant_illum
             * genes[:, Gene.PHOTOSYNTHESIS]
             * genes[:, Gene.ROOTING]
             * ocfg.photo_max
@@ -539,6 +602,29 @@ class SphereEngine:
                 else:
                     taken2 = self.resources.consume_many(targets, short[hf])
                 stomach[hf] += taken2
+
+        # 4.3) L9 食腐：食用同格尸体（尸体不如新鲜食物，消化率低）
+        if self._carcass is not None:
+            carc_cfg = self.config.carcass
+            # 有胃容量剩余的个体才能食腐
+            room = stomach_cap - stomach
+            scavengers = np.flatnonzero(room > 1e-9)
+            if len(scavengers):
+                s_flat = self._flat[scavengers]
+                carcass_avail = self._carcass[s_flat]
+                # 每只想吃的尸体量 = 进食量 × 0.5（食腐效率低于新鲜食物）
+                want_carcass = np.minimum(
+                    ocfg.eat_amount * eat_mult[scavengers] * 0.5,
+                    room[scavengers],
+                )
+                # 同格多只时均分尸体（与 consume_many 同样的均分逻辑）
+                cnt = np.zeros(self.world.n_cells, dtype=np.int64)
+                np.add.at(cnt, s_flat, 1)
+                per_cell = np.minimum(carcass_avail, want_carcass * cnt[s_flat])
+                share = per_cell / np.maximum(1, cnt[s_flat])
+                np.subtract.at(self._carcass, s_flat, share)
+                # 消化率低：获得的胃粮 = 食用量 × 消化率
+                stomach[scavengers] += share * carc_cfg.scavenge_digestibility
 
         # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）
         cur_flat = self._flat[:P]
@@ -666,6 +752,13 @@ class SphereEngine:
                 targets = np.empty(Nm, dtype=np.int64)
                 for i, idx in enumerate(mi):
                     nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                    # L8 地形：过滤掉水域邻居（不可通行）
+                    if self._terrain is not None:
+                        nb = nb[self._terrain.passable[nb]]
+                    if len(nb) == 0:
+                        # 所有邻居都是水域，不移动
+                        targets[i] = self._flat[idx]
+                        continue
                     if len(nb) == 1:
                         targets[i] = nb[0]
                         continue
@@ -690,7 +783,12 @@ class SphereEngine:
                     else:
                         targets[i] = nb[int(np.argmax(score))]
                 self._flat[mi] = targets
-                energy[mi] -= move_cost_ind[mi]
+                # L8 地形：移动到山地时能耗加倍
+                if self._terrain is not None:
+                    terrain_mult = self._terrain.move_cost_at(targets)
+                    energy[mi] -= move_cost_ind[mi] * terrain_mult
+                else:
+                    energy[mi] -= move_cost_ind[mi]
                 # 5.6) 信任学习
                 target_cells = self._flat[mi]
                 had_signal = sig_present[target_cells] > 0
@@ -800,6 +898,19 @@ class SphereEngine:
             deaths[DeathCause.OLD_AGE] = n_expired
         if n_predation:
             deaths[DeathCause.PREDATION] = n_predation
+
+        # 7.5) L9 死亡转尸体：死亡个体的剩余能量×carcass_ratio + 胃粮×carcass_ratio
+        #      转化为同格尸体（能量不凭空消失，形成尸体→食腐→分解→资源循环）
+        if self._carcass is not None and dead.any():
+            carc_cfg = self.config.carcass
+            dead_idx = np.flatnonzero(dead)
+            dead_flat = self._flat[dead_idx]
+            carcass_energy = (
+                energy[dead_idx] * carc_cfg.carcass_ratio
+                + stomach[dead_idx] * carc_cfg.carcass_ratio
+            )
+            carcass_energy = np.maximum(carcass_energy, 0.0)
+            np.add.at(self._carcass, dead_flat, carcass_energy)
 
         # 8) 繁殖：冷却期（g12）倒数；能量 ≥ 阈值（0.25+g2×0.65），且种群未满
         # 注意：统一用 Python 计算繁殖判定（不用 Rust 的 out_repro），
@@ -1176,7 +1287,7 @@ class SphereEngine:
     # 快照机制：支持长实验分段续跑（v2，适配 L10a + 统计数组）
     # ============================================================
 
-    SNAPSHOT_VERSION = 2
+    SNAPSHOT_VERSION = 3
 
     def save_snapshot(self, path: str) -> None:
         """保存完整引擎状态到 npz 文件（压缩）。
@@ -1222,10 +1333,19 @@ class SphereEngine:
         data["fruit_charge"] = self._fruit_charge[:P].copy()
         data["seed_carried"] = self._seed_carried[:P].copy()
 
+        # --- 3.6 L9 尸体场 ---
+        if self._carcass is not None:
+            data["carcass"] = self._carcass.copy()
+        else:
+            data["carcass"] = np.zeros(self.world.n_cells, dtype=np.float64)
+
         # --- 4. 世界状态（资源场 + 信号场）---
         data["resource_grid"] = self.resources._grid.copy()
         data["resource_capacity"] = self.resources._capacity.copy()
-        data["resource_patch_mask"] = self.resources._patch_mask.copy()
+        if self.resources._patch_mask is not None:
+            data["resource_patch_mask"] = self.resources._patch_mask.copy()
+        else:
+            data["resource_patch_mask"] = np.zeros(self.world.n_cells, dtype=bool)
         data["resource_bg_regrowth_mult"] = np.array(self.resources._bg_regrowth_mult)
         data["resource_patch_regrowth_mult"] = np.array(self.resources._patch_regrowth_mult)
         data["signal_marks"] = self.signals._marks.copy()
@@ -1336,6 +1456,12 @@ class SphereEngine:
         engine._fruit_grid = data["fruit_grid"].copy()
         engine._fruit_charge = data["fruit_charge"].copy()
         engine._seed_carried = data["seed_carried"].copy()
+
+        # --- 7.5 L9 尸体场恢复 ---
+        if "carcass" in data:
+            engine._carcass = data["carcass"].copy()
+        else:
+            engine._carcass = None  # 旧快照无尸体场
 
         # --- 8. 恢复世界状态 ---
         engine.resources._grid = data["resource_grid"].copy()

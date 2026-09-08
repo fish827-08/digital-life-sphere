@@ -264,6 +264,78 @@ class FruitConfig:
 
 
 @dataclass
+class CarcassConfig:
+    """尸体能量守恒参数（L9）：死亡生物量不凭空消失，形成尸体→食腐→分解循环。
+
+    能量守恒方程：总生物量(生物+胃粮+食物+尸体+果实)变化 = 光合输入 - 代谢/维持/移动/攻击/繁殖/分解损耗。
+    默认 enabled=False（不改变现有行为），开启后死亡个体能量按比例转化为尸体。
+    """
+
+    enabled: bool = False              # 总开关（False 时尸体数组存在但不转化/食用）
+    carcass_ratio: float = 0.8         # 死亡时能量转化为尸体的比例（其余 20% 为不可食用部分/代谢损耗）
+    scavenge_digestibility: float = 0.7  # 食腐消化率（尸体不如新鲜食物）
+    decomposition_rate: float = 0.002  # 尸体每 tick 自然分解比例（约 500 tick 完全分解）
+    resource_conversion: float = 0.5   # 分解的尸体转化为食物资源的比例（其余为分解损耗）
+    scavenge_joy: float = 0.003        # 食腐的愉悦度权重（低于进食新鲜食物）
+
+    def __post_init__(self) -> None:
+        assert 0.0 <= self.carcass_ratio <= 1.0
+        assert 0.0 <= self.scavenge_digestibility <= 1.0
+        assert 0.0 <= self.decomposition_rate <= 1.0
+        assert 0.0 <= self.resource_conversion <= 1.0
+
+
+@dataclass
+class TerrainConfig:
+    """地形系统参数（L8 简化版）：静态空间异质性，水域不可通行，山地移动能耗高。
+
+    简化实现：不用值噪声，用纬度带（极地附近水域概率高）+ 随机斑块生成。
+    地形类型：0=平原（默认）、1=山地（移动能耗×2、资源再生×0.3）、2=水域（不可通行）。
+    默认 enabled=False（不改变现有行为）。
+    """
+
+    enabled: bool = False              # 总开关
+    water_ratio: float = 0.08          # 水域占比（不可通行格）
+    mountain_ratio: float = 0.12       # 山地占比
+    mountain_move_mult: float = 2.0    # 山地移动能耗倍率
+    mountain_regrow_mult: float = 0.3  # 山地资源再生倍率
+    water_pole_bias: float = 0.5       # 极地水域概率加成（0=均匀，1=极地水域概率×2）
+
+    def __post_init__(self) -> None:
+        assert 0.0 <= self.water_ratio <= 0.5
+        assert 0.0 <= self.mountain_ratio <= 0.5
+        assert self.water_ratio + self.mountain_ratio <= 0.8
+        assert self.mountain_move_mult >= 1.0
+        assert 0.0 <= self.mountain_regrow_mult <= 1.0
+
+
+@dataclass
+class SeasonConfig:
+    """季节系统参数：黄赤交角导致太阳直射点随季节移动，冬季半球资源贫瘠。
+
+    季节周期 = year_length × rotation_period（tick）。太阳直射纬度 = axial_tilt × sin(2π×tick/year_ticks)。
+    冬季半球：光照降低→温度降低→资源再生和植物光合减缓，迫使生物迁移至夏季半球。
+    默认 enabled=False（不改变现有行为，保持原固定太阳模型）。
+    """
+
+    enabled: bool = False              # 总开关
+    year_length: int = 3               # 一年 = 多少个世界日（rotation_period）。
+                                        # 数值平衡：生物寿命=1~8世界日（g3决定，平均≈4.5），
+                                        # year_length=3 时平均寿命≈1.5年、最长≈2.7年，
+                                        # 确保大部分生物能体验至少1个完整四季，长寿生物2~3个。
+                                        # 调大→季节变化慢、生物体验少；调小→季节变化快、选择压强。
+    axial_tilt: float = 0.4            # 黄赤交角（弧度，约23°），太阳直射点摆动幅度
+    winter_regrow_mult: float = 0.3    # 冬季半球资源再生倍率（冬季资源贫瘠）
+    winter_photo_mult: float = 0.3     # 冬季半球植物光合倍率
+
+    def __post_init__(self) -> None:
+        assert self.year_length >= 1
+        assert 0.0 <= self.axial_tilt <= 1.0
+        assert 0.0 <= self.winter_regrow_mult <= 1.0
+        assert 0.0 <= self.winter_photo_mult <= 1.0
+
+
+@dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
 
@@ -279,6 +351,9 @@ class SimConfig:
     predation: PredationConfig = field(default_factory=PredationConfig)
     culture: CultureConfig = field(default_factory=CultureConfig)
     fruit: FruitConfig = field(default_factory=FruitConfig)
+    carcass: CarcassConfig = field(default_factory=CarcassConfig)
+    terrain: TerrainConfig = field(default_factory=TerrainConfig)
+    season: SeasonConfig = field(default_factory=SeasonConfig)
 
     # ---- 可复现性辅助：配置 ⇄ dict ------------------------------
 
@@ -323,6 +398,24 @@ class SimConfig:
                 FruitConfig(**data["fruit"])
                 if "fruit" in data
                 else FruitConfig()
+            ),
+            # L9 尸体能量守恒；旧存档回退默认值（enabled=False）。
+            carcass=(
+                CarcassConfig(**data["carcass"])
+                if "carcass" in data
+                else CarcassConfig()
+            ),
+            # L8 地形系统；旧存档回退默认值（enabled=False）。
+            terrain=(
+                TerrainConfig(**data["terrain"])
+                if "terrain" in data
+                else TerrainConfig()
+            ),
+            # 季节系统；旧存档回退默认值（enabled=False）。
+            season=(
+                SeasonConfig(**data["season"])
+                if "season" in data
+                else SeasonConfig()
             ),
         )
 

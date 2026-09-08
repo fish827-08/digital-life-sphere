@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -275,24 +277,19 @@ class ResourceField:
 
     # ---- 再生（食物慢慢长回来） -----------------------------------------------
 
-    def regrow(self, tick: int) -> None:
+    def regrow(self, tick: int, extra_mult: Optional[NDArray[np.float64]] = None) -> None:
         """让全世界的食物都长一点（一次性整场更新）。
-
-        通俗理解：过了一个 tick，每格食物都加上一点"恢复量"，
-        但上限是粮仓容量，长满了就不再长。而且——
-        冷的地方（极点、深夜）恢复量会打折，温度越低长得越慢，
-        热带正午长得最快。这是"随 tick 推进"的时间节律（昼夜）。
 
         参数
         ----
         tick : int
-            当前时间步。决定此时各格温度 → 决定恢复量折扣。
-
-        返回
-        ----
-        None。直接修改内部存量数组。
+            当前时间步。
+        extra_mult : NDArray[float64], 可选
+            每格额外再生倍率（季节因子 × 地形因子）。None 时不乘。
         """
         growth = self._regrowth_amount(tick)
+        if extra_mult is not None:
+            growth = growth * extra_mult
         np.minimum(self._capacity, self._grid + growth, out=self._grid)
 
     def _regrowth_amount(self, tick: int) -> NDArray[np.float64]:
