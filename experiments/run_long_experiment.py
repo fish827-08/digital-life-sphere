@@ -69,7 +69,7 @@ def _stats(e, tick, rate, elapsed_h):
     p = e.alive_count()
     n_cells = e.world.n_cells
     density = p / n_cells
-    g = e._genes[:p].mean(axis=0) if p > 0 else np.zeros(e.gene_count)
+    g = e._genes[:p].mean(axis=0) if p > 0 else np.zeros(e._genes.shape[1])
     sig_density = int(e.signals.active_count()) if hasattr(e, 'signals') else 0
     trust = float(e._trust[:p].mean()) if p > 0 and hasattr(e, '_trust') else 0.0
     cult_div = float(e._interpret[:p].std(axis=0).mean()) if p > 0 and hasattr(e, '_interpret') else 0.0
