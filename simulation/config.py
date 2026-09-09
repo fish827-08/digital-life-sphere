@@ -230,6 +230,57 @@ class CultureConfig:
 
 
 @dataclass
+class InfoStructureConfig:
+    """D2 信息结构重构参数（语言涌现最小充分条件）。
+
+    四大机制（评估报告 M2 gate，元宝/六模型共识）：
+      1. 学习瓶颈：解读表不遗传，幼体从有限(信号,后果)观察样本归纳
+      2. 任意性：信号pattern=个体可遗传码本[状态]，映射可漂移可协商
+      3. 信息不对称：感知半径8→4 + 感知噪声 + softmax(tau)替代argmax
+      4. Steels对齐：同格相遇概率性解读表对齐（带噪声）
+
+    默认 enabled=False（完全不改变现有行为，向后兼容）；
+    开启后唯一验收判据：g15 在无手调补贴下从 0.5 上升。
+    """
+
+    enabled: bool = False                # D2 总开关（False 时全部机制不执行，行为与旧版完全一致）
+
+    # ---- 机制1：学习瓶颈 ----
+    learning_bottleneck: bool = True     # 解读表不遗传，幼体随机初始化后通过观察学习
+    learning_rate: float = 0.15          # 幼体观察学习率（每次观察更新解读表的步长）
+    learning_samples_max: int = 60       # 学习瓶颈：单个体最多观察学习次数（达到后停止学习=瓶颈）
+    learning_maturity_ticks: int = 1200  # 幼体学习窗口长度（tick），超过后不再学习
+
+    # ---- 机制2：任意性码本 ----
+    arbitrary_codebook: bool = True       # 信号pattern=码本[状态]，而非硬编码状态函数
+    codebook_mutation_rate: float = 0.02 # 码本每位突变概率（繁殖时）
+    codebook_mutation_sigma: float = 0.3 # 码本突变时新映射的随机强度
+
+    # ---- 机制3：信息不对称 ----
+    perception_radius: int = 4            # 感知半径：4=Von Neumann(上下左右), 8=Moore(全邻)
+    perception_noise: float = 0.05        # 感知噪声σ（食物/信号感知时加高斯噪声）
+    softmax_tau: float = 0.15             # 移动决策softmax温度（0=argmax旧行为，越大越随机探索）
+
+    # ---- 机制4：Steels 对齐 ----
+    steels_alignment: bool = True         # 同格相遇时概率性解读表对齐
+    alignment_rate: float = 0.1           # 相遇时对齐概率（每tick每对）
+    alignment_step: float = 0.15          # 对齐步长（解读表向对方收敛的比例）
+    alignment_noise: float = 0.02         # 对齐时附加噪声σ
+
+    def __post_init__(self) -> None:
+        assert self.perception_radius in (4, 8), "感知半径只支持4(Von Neumann)或8(Moore)"
+        assert 0.0 <= self.learning_rate <= 1.0
+        assert self.learning_samples_max >= 1
+        assert self.learning_maturity_ticks >= 1
+        assert 0.0 <= self.codebook_mutation_rate <= 1.0
+        assert self.perception_noise >= 0
+        assert self.softmax_tau >= 0
+        assert 0.0 <= self.alignment_rate <= 1.0
+        assert 0.0 <= self.alignment_step <= 1.0
+        assert self.alignment_noise >= 0
+
+
+@dataclass
 class FruitConfig:
     """果实-种子传播参数（L10a，植物-动物协同进化）。
 
@@ -279,6 +330,7 @@ class SimConfig:
     pleasure: PleasureConfig = field(default_factory=PleasureConfig)
     predation: PredationConfig = field(default_factory=PredationConfig)
     culture: CultureConfig = field(default_factory=CultureConfig)
+    info_structure: InfoStructureConfig = field(default_factory=InfoStructureConfig)
     fruit: FruitConfig = field(default_factory=FruitConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
@@ -323,6 +375,12 @@ class SimConfig:
                 CultureConfig(**data["culture"])
                 if "culture" in data
                 else CultureConfig()
+            ),
+            # D2 信息结构重构配置；旧存档回退默认值（enabled=False，不改变旧行为）。
+            info_structure=(
+                InfoStructureConfig(**data["info_structure"])
+                if "info_structure" in data
+                else InfoStructureConfig()
             ),
             # L10a 新增果实-种子传播配置；旧存档回退默认值（enabled=False）。
             fruit=(

@@ -110,6 +110,7 @@ class SphereEngine:
         "_repro_cooldown",
         "_valence", "_arousal", "_expectation", "_baseline", "_trust",
         "_work_memory", "_mem_ptr", "_interpret", "_nb_table",
+        "_codebook", "_learning_count",  # D2 信息结构：任意性码本 + 学习瓶颈计数
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
@@ -231,6 +232,13 @@ class SphereEngine:
         # 信号解读表（L5 文化传递）：(N,16)，对 16 种信号模式的响应倾向
         # 正值=移向，负值=逃避，0=忽略；初始随机，幼体向周围成体学习
         self._interpret = self.rng.normal(0.0, 0.3, size=(n, 16))
+        # D2 任意性码本：(N,16)，每个状态(0~15)映射到一个信号模式(0~15)
+        # 初始恒等映射 codebook[state]=state（与旧版硬编码行为一致）；
+        # 繁殖时遗传+突变，映射可漂移可协商。D2 disabled 时不使用。
+        self._codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(n, axis=0).copy()
+        # D2 学习瓶颈计数：(N,)，每个个体已完成的观察学习次数；
+        # 达到 learning_samples_max 后停止学习（=瓶颈）。D2 disabled 时不使用。
+        self._learning_count = np.zeros(n, dtype=np.int32)
         # 乐观初始化：0.8 × max_reward，逼生物探索（预期高→现实可能超预期→愉悦）
         self._expectation = np.full(
             (n, pcfg.expectation_size),
@@ -574,7 +582,9 @@ class SphereEngine:
         if self.config.signal_mode == "random":
             rng_rand = np.random.default_rng(self.config.seed + 99991)  # 独立种子偏移
             random_patterns = rng_rand.integers(1, 16, size=P, dtype=np.uint8)
-        if self._use_sim_core and random_patterns is None:
+        if self._use_sim_core and random_patterns is None and not (
+            self.config.info_structure.enabled and self.config.info_structure.arbitrary_codebook
+        ):
             SIGNAL_COST = 0.1
             dens = occ.astype(np.float64)
             self._sim_core.signal_emit(
@@ -605,7 +615,14 @@ class SphereEngine:
                             > 0.5 * self.resources._capacity[e_flat]
                         ).astype(np.int64)
                         n_bit = (occ[e_flat] > 1).astype(np.int64)
-                        patterns = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.uint8)
+                        state = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.int64)
+                        ifcfg = self.config.info_structure
+                        if ifcfg.enabled and ifcfg.arbitrary_codebook:
+                            # D2-2 任意性：pattern = 个体码本[state]，映射可遗传可漂移
+                            patterns = self._codebook[emitters, state].astype(np.uint8)
+                        else:
+                            # 旧版：pattern = state（恒等映射，硬编码状态函数）
+                            patterns = state.astype(np.uint8)
                     self.signals.write_many(e_flat, patterns)
 
         # 4.5) L10a 动物吃果实→能量转移（默认关闭；确定性数值管线，Rust 可下沉）
@@ -617,7 +634,10 @@ class SphereEngine:
         #    stage2 只做年龄/冷却（moved_raw 全 False，不重复扣移动耗能）。
         move_prob = genes[:, Gene.MOVE_PROB] * (1.0 - genes[:, Gene.ROOTING])
         move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, Gene.MOVE_COST])
-        if self._use_sim_core:
+        # D2-3 信息不对称：感知半径4/噪声/softmax 暂未下沉 Rust，启用时走 Python 路径
+        _ifcfg = self.config.info_structure
+        _d2_asym = _ifcfg.enabled and (_ifcfg.perception_radius == 4 or _ifcfg.perception_noise > 0 or _ifcfg.softmax_tau > 0)
+        if self._use_sim_core and not _d2_asym:
             moved_raw = self.rng.random(P) < move_prob
             mi = np.flatnonzero(moved_raw & (energy >= move_cost_ind))
             # stage2：moved_raw 全 False（移动耗能改由 step_movement 扣），年龄/冷却正常
@@ -670,6 +690,26 @@ class SphereEngine:
                 self._trust[mi[false_sig]] = np.maximum(
                     0.0, self._trust[mi[false_sig]] - ccfg.trust_false
                 )
+                # D2-1 学习瓶颈：幼体观察学习（信号+后果→更新解读表）
+                ifcfg = self.config.info_structure
+                if ifcfg.enabled and ifcfg.learning_bottleneck and len(mi) > 0:
+                    young = self._age[mi] < ifcfg.learning_maturity_ticks
+                    can_learn = self._learning_count[mi] < ifcfg.learning_samples_max
+                    learners = mi[young & can_learn]
+                    if len(learners) > 0:
+                        l_targets = self._flat[learners]
+                        l_marks = self.signals._marks[l_targets].astype(np.int64)
+                        l_has_sig = l_marks > 0
+                        l_has_food = food_ratio[l_targets] > ccfg.food_threshold
+                        lr = ifcfg.learning_rate
+                        for j, idx in enumerate(learners):
+                            if l_has_sig[j]:
+                                m = int(l_marks[j])
+                                if l_has_food[j]:
+                                    self._interpret[idx, m] += lr * (1.0 - self._interpret[idx, m])
+                                else:
+                                    self._interpret[idx, m] -= lr * (1.0 + self._interpret[idx, m])
+                                self._learning_count[idx] += 1
         else:
             moved = self.rng.random(P) < move_prob
             moved &= energy >= move_cost_ind  # 付得起才走
@@ -691,15 +731,30 @@ class SphereEngine:
                     0, 1_000_000, size=Nm, dtype=np.int64
                 )
                 targets = np.empty(Nm, dtype=np.int64)
+                ifcfg3 = self.config.info_structure
+                d2_asym = ifcfg3.enabled and ifcfg3.perception_radius == 4
+                d2_noise = ifcfg3.enabled and ifcfg3.perception_noise > 0
+                d2_softmax = ifcfg3.enabled and ifcfg3.softmax_tau > 0
                 for i, idx in enumerate(mi):
                     nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                    # D2-3 信息不对称：感知半径4（Von Neumann，只取前4个邻居）
+                    if d2_asym and len(nb) > 4:
+                        nb = nb[:4]
                     if len(nb) == 1:
                         targets[i] = nb[0]
                         continue
                     perc = genes[idx, Gene.PERCEPTION]
                     soc = (genes[idx, Gene.SOCIABILITY] - 0.5) * 2.0
+                    # D2-3 感知噪声：食物/信号感知加高斯噪声（独立rng，不消费主rng）
+                    fr = food_ratio[nb].copy()
+                    sp = sig_present[nb].copy()
+                    if d2_noise:
+                        fr += np.random.normal(0, ifcfg3.perception_noise, size=len(nb))
+                        sp += np.random.normal(0, ifcfg3.perception_noise, size=len(nb))
+                        fr = np.clip(fr, 0.0, 1.0)
+                        sp = np.clip(sp, 0.0, 1.0)
                     score = perc * (
-                        food_ratio[nb] * 0.5 + sig_present[nb] * 0.5 * self._trust[idx]
+                        fr * 0.5 + sp * 0.5 * self._trust[idx]
                     ) + soc * densities[nb]
                     valid_mem = self._work_memory[idx][self._work_memory[idx] >= 0]
                     if len(valid_mem) > 0:
@@ -712,7 +767,15 @@ class SphereEngine:
                             dtype=np.float64,
                         )
                         score = score + 0.4 * perc * interp
-                    if score.max() - score.min() < 1e-9:
+                    # D2-3 softmax：温度采样替代argmax（tau=0时回退argmax）
+                    if d2_softmax:
+                        exp_s = np.exp((score - score.max()) / ifcfg3.softmax_tau)
+                        probs = exp_s / exp_s.sum()
+                        # 消费主rng一个uniform用于采样（保对拍）
+                        u = self.rng.random()
+                        cum = np.cumsum(probs)
+                        targets[i] = nb[int(np.searchsorted(cum, u))]
+                    elif score.max() - score.min() < 1e-9:
                         targets[i] = nb[int(rand_choice[i] % len(nb))]
                     else:
                         targets[i] = nb[int(np.argmax(score))]
@@ -730,6 +793,26 @@ class SphereEngine:
                 self._trust[mi[false_sig]] = np.maximum(
                     0.0, self._trust[mi[false_sig]] - ccfg.trust_false
                 )
+                # D2-1 学习瓶颈：幼体观察学习（Python路径，与Rust路径逻辑一致）
+                ifcfg_lb = self.config.info_structure
+                if ifcfg_lb.enabled and ifcfg_lb.learning_bottleneck and len(mi) > 0:
+                    young = self._age[mi] < ifcfg_lb.learning_maturity_ticks
+                    can_learn = self._learning_count[mi] < ifcfg_lb.learning_samples_max
+                    learners = mi[young & can_learn]
+                    if len(learners) > 0:
+                        l_targets = self._flat[learners]
+                        l_marks = self.signals._marks[l_targets].astype(np.int64)
+                        l_has_sig = l_marks > 0
+                        l_has_food = food_ratio[l_targets] > ccfg.food_threshold
+                        lr = ifcfg_lb.learning_rate
+                        for j, idx in enumerate(learners):
+                            if l_has_sig[j]:
+                                m = int(l_marks[j])
+                                if l_has_food[j]:
+                                    self._interpret[idx, m] += lr * (1.0 - self._interpret[idx, m])
+                                else:
+                                    self._interpret[idx, m] -= lr * (1.0 + self._interpret[idx, m])
+                                self._learning_count[idx] += 1
 
         # 5.5) 捕食（g16）+ 6.5) 文化学习（L5）：use_sim_core=True 时合并为一次 Rust 调用，
         #     共用一次 cell→个体 CSR 构建，消除重复开销。use_sim_core=False 时分步执行。
@@ -765,6 +848,30 @@ class SphereEngine:
                 pcfg.success_floor, pcfg.success_ceil,
                 pcfg.transfer_ratio, pcfg.stomach_transfer,
             )
+            # ── D2-4 Steels 对齐：同格相遇对齐解读表+码本（Rust路径Python侧补做） ──
+            ifcfg_sa_r = self.config.info_structure
+            if ifcfg_sa_r.enabled and ifcfg_sa_r.steels_alignment:
+                occ_sa = np.bincount(self._flat[:P], minlength=self.world.n_cells)
+                crowded_sa = np.flatnonzero(occ_sa > 1)
+                for cell in crowded_sa:
+                    cell_idx = np.flatnonzero(self._flat[:P] == cell)
+                    if len(cell_idx) < 2:
+                        continue
+                    np.random.shuffle(cell_idx)
+                    for pair in range(0, len(cell_idx) - 1, 2):
+                        i, j = int(cell_idx[pair]), int(cell_idx[pair + 1])
+                        if self.rng.random() < ifcfg_sa_r.alignment_rate:
+                            # 解读表对齐（浮点EWMA）
+                            diff = self._interpret[j] - self._interpret[i]
+                            noise_i = self.rng.normal(0, ifcfg_sa_r.alignment_noise, size=16)
+                            noise_j = self.rng.normal(0, ifcfg_sa_r.alignment_noise, size=16)
+                            self._interpret[i] += ifcfg_sa_r.alignment_step * diff + noise_i
+                            self._interpret[j] -= ifcfg_sa_r.alignment_step * diff + noise_j
+                            # 码本对齐（离散概率替换：每个状态以alignment_step概率让i采用j的映射）
+                            if ifcfg_sa_r.arbitrary_codebook:
+                                cb_mask = self.rng.random(16) < ifcfg_sa_r.alignment_step
+                                if cb_mask.any():
+                                    self._codebook[i, cb_mask] = self._codebook[j, cb_mask]
         else:
             # ── Python 分步：捕食 ──
             if len(attackers) > 0:
@@ -810,6 +917,31 @@ class SphereEngine:
                     if len(adult_idx) > 0:
                         mean_interpret = self._interpret[adult_idx].mean(axis=0)
                         self._interpret[idx] += 0.1 * (mean_interpret - self._interpret[idx])
+            # ── D2-4 Steels 对齐：同格相遇概率性解读表对齐 ──
+            ifcfg_sa = self.config.info_structure
+            if ifcfg_sa.enabled and ifcfg_sa.steels_alignment:
+                occ_py = np.bincount(self._flat[:P], minlength=self.world.n_cells)
+                crowded = np.flatnonzero(occ_py > 1)
+                for cell in crowded:
+                    cell_idx = np.flatnonzero(self._flat[:P] == cell)
+                    if len(cell_idx) < 2:
+                        continue
+                    # 随机配对（消费主rng保对拍）
+                    np.random.shuffle(cell_idx)
+                    for pair in range(0, len(cell_idx) - 1, 2):
+                        i, j = int(cell_idx[pair]), int(cell_idx[pair + 1])
+                        if self.rng.random() < ifcfg_sa.alignment_rate:
+                            # 解读表对齐（浮点EWMA）
+                            diff = self._interpret[j] - self._interpret[i]
+                            noise_i = self.rng.normal(0, ifcfg_sa.alignment_noise, size=16)
+                            noise_j = self.rng.normal(0, ifcfg_sa.alignment_noise, size=16)
+                            self._interpret[i] += ifcfg_sa.alignment_step * diff + noise_i
+                            self._interpret[j] -= ifcfg_sa.alignment_step * diff + noise_j
+                            # 码本对齐（离散概率替换）
+                            if ifcfg_sa.arbitrary_codebook:
+                                cb_mask = self.rng.random(16) < ifcfg_sa.alignment_step
+                                if cb_mask.any():
+                                    self._codebook[i, cb_mask] = self._codebook[j, cb_mask]
 
         # 7) 死亡判定：饿死（energy<=0）→ 老死（age>=寿命）→ 被捕食
         # 注意：统一用 Python 计算（不用 Rust 的 out_starved/out_expired），
@@ -846,7 +978,10 @@ class SphereEngine:
         born = 0
         if K > 0:
             ri = np.flatnonzero(repro)[:K]
-            if self._use_sim_core:
+            # D2 学习瓶颈/任意性码本：Rust 侧暂未实现，启用时走 Python 路径
+            _ifcfg_d2 = self.config.info_structure
+            _d2_repro = _ifcfg_d2.enabled and (_ifcfg_d2.learning_bottleneck or _ifcfg_d2.arbitrary_codebook)
+            if self._use_sim_core and not _d2_repro:
                 # ---- Rust 路径（T4 L7b）：reproduce_batch 一次性算完基因/能量/文化继承 ----
                 # RNG 顺序必须与 Python 参考路径逐位一致：
                 #   1) mut_mask = random < rate；2) (若任一变异) gene_noise = normal；
@@ -865,6 +1000,8 @@ class SphereEngine:
                     0.0, pcfg.inheritance_noise, size=(K, 120)
                 )
                 interp_noise = self.rng.normal(0.0, 0.1, size=(K, 16))
+                # Rust 路径：D2 关闭时码本恒等映射（与旧版行为一致）
+                child_codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(K, axis=0).copy()
                 child_genes = np.empty((K, gcfg.gene_count), dtype=np.float64)
                 child_energy = np.empty(K, dtype=np.float64)
                 child_stomach = np.empty(K, dtype=np.float64)
@@ -911,9 +1048,27 @@ class SphereEngine:
                 # 信任度：子代半继承亲代，回归中性 0.5
                 child_trust = self._trust[ri] * 0.8 + 0.5 * 0.2
                 child_baseline = self._baseline[ri] * 0.5
-                # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体）
-                child_interp = self._interpret[ri].copy()
-                child_interp += self.rng.normal(0.0, 0.1, size=child_interp.shape)
+                # 信号解读表：D2 学习瓶颈 vs 旧版遗传
+                ifcfg = self.config.info_structure
+                if ifcfg.enabled and ifcfg.learning_bottleneck:
+                    # 学习瓶颈：解读表不遗传，幼体随机初始化（与成体初始分布 normal(0,0.3) 一致）
+                    # 消费 (K,16) 个 normal，与旧版 interp_noise 个数相同 → 保 RNG 顺序
+                    child_interp = self.rng.normal(0.0, 0.3, size=(K, 16))
+                else:
+                    # 旧版：子代继承亲代 + 噪声（文化传递的核心载体）
+                    child_interp = self._interpret[ri].copy()
+                    child_interp += self.rng.normal(0.0, 0.1, size=child_interp.shape)
+                # D2 任意性码本：子代遗传亲代码本 + 突变
+                if ifcfg.enabled and ifcfg.arbitrary_codebook:
+                    child_codebook = self._codebook[ri].copy()
+                    cb_mut = self.rng.random((K, 16)) < ifcfg.codebook_mutation_rate
+                    if cb_mut.any():
+                        # 突变位映射到随机模式(1~15，0保留为无信号)
+                        cb_new = self.rng.integers(1, 16, size=(K, 16), dtype=np.uint8)
+                        child_codebook[cb_mut] = cb_new[cb_mut]
+                else:
+                    # D2 关闭：码本恒等映射（与旧版硬编码行为一致）
+                    child_codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(K, axis=0).copy()
 
             ids = np.arange(self._next_id, self._next_id + K, dtype=np.int64)
             self._next_id += K
@@ -944,6 +1099,10 @@ class SphereEngine:
             )
             # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体，Rust 路径已算好）
             self._interpret = np.concatenate([self._interpret, child_interp])
+            # D2 码本：子代遗传+突变（Rust 路径已算好；Python 路径在上方计算）
+            self._codebook = np.concatenate([self._codebook, child_codebook])
+            # D2 学习计数：子代从零开始
+            self._learning_count = np.concatenate([self._learning_count, np.zeros(K, dtype=np.int32)])
             # L10a：子代果实蓄力清零，种子携带清零
             self._fruit_charge = np.concatenate([self._fruit_charge, np.zeros(K, dtype=np.float64)])
             self._seed_carried = np.concatenate([self._seed_carried, np.zeros(K, dtype=np.int32)])
@@ -997,6 +1156,13 @@ class SphereEngine:
             )
             self._interpret = np.concatenate(
                 [self._interpret[:P][keep], self._interpret[P:]]
+            )
+            # D2：码本/学习计数同步清理
+            self._codebook = np.concatenate(
+                [self._codebook[:P][keep], self._codebook[P:]]
+            )
+            self._learning_count = np.concatenate(
+                [self._learning_count[:P][keep], self._learning_count[P:]]
             )
             # L10a：果实蓄力/种子携带同步清理
             self._fruit_charge = np.concatenate(
@@ -1203,7 +1369,7 @@ class SphereEngine:
     # 快照机制：支持长实验分段续跑（v2，适配 L10a + 统计数组）
     # ============================================================
 
-    SNAPSHOT_VERSION = 2
+    SNAPSHOT_VERSION = 3
 
     def save_snapshot(self, path: str) -> None:
         """保存完整引擎状态到 npz 文件（压缩）。
@@ -1244,6 +1410,10 @@ class SphereEngine:
         data["mem_ptr"] = np.array(self._mem_ptr)
         data["interpret"] = self._interpret[:P].copy()  # (P, 16)
 
+        # --- 3.1 D2 信息结构数组 ---
+        data["codebook"] = self._codebook[:P].copy()  # (P, 16) uint8
+        data["learning_count"] = self._learning_count[:P].copy()  # (P,) int32
+
         # --- 3.5 L10a 果实-种子传播数组 ---
         data["fruit_grid"] = self._fruit_grid.copy()  # (n_cells,)
         data["fruit_charge"] = self._fruit_charge[:P].copy()
@@ -1252,7 +1422,11 @@ class SphereEngine:
         # --- 4. 世界状态（资源场 + 信号场）---
         data["resource_grid"] = self.resources._grid.copy()
         data["resource_capacity"] = self.resources._capacity.copy()
-        data["resource_patch_mask"] = self.resources._patch_mask.copy()
+        data["resource_patch_mask"] = (
+            self.resources._patch_mask.copy()
+            if self.resources._patch_mask is not None
+            else np.zeros(0, dtype=bool)
+        )
         data["resource_bg_regrowth_mult"] = np.array(self.resources._bg_regrowth_mult)
         data["resource_patch_regrowth_mult"] = np.array(self.resources._patch_regrowth_mult)
         data["signal_marks"] = self.signals._marks.copy()
@@ -1359,6 +1533,18 @@ class SphereEngine:
         engine._mem_ptr = int(data["mem_ptr"])
         engine._interpret = data["interpret"].copy()
 
+        # --- 7.1 恢复 D2 信息结构数组（v3 新增；旧快照回退默认值）---
+        if "codebook" in data:
+            engine._codebook = data["codebook"].copy()
+        else:
+            engine._codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(
+                len(engine._id), axis=0
+            ).copy()
+        if "learning_count" in data:
+            engine._learning_count = data["learning_count"].copy()
+        else:
+            engine._learning_count = np.zeros(len(engine._id), dtype=np.int32)
+
         # --- 7.5 恢复 L10a 数组 ---
         engine._fruit_grid = data["fruit_grid"].copy()
         engine._fruit_charge = data["fruit_charge"].copy()
@@ -1367,7 +1553,8 @@ class SphereEngine:
         # --- 8. 恢复世界状态 ---
         engine.resources._grid = data["resource_grid"].copy()
         engine.resources._capacity = data["resource_capacity"].copy()
-        engine.resources._patch_mask = data["resource_patch_mask"].copy()
+        _pm = data["resource_patch_mask"]
+        engine.resources._patch_mask = _pm.copy() if _pm.size > 0 else None
         engine.resources._bg_regrowth_mult = float(data["resource_bg_regrowth_mult"])
         engine.resources._patch_regrowth_mult = float(data["resource_patch_regrowth_mult"])
         engine.signals._marks = data["signal_marks"].copy()
