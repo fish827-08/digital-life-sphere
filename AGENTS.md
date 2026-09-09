@@ -55,10 +55,35 @@ cd .. && python3 -m pytest tests/ -q --ignore=tests/test_broker.py
 6 个预留位（g17/g18/g20/g21/g22/g23）优先复用，耗尽前不扩 gene_count。
 扩位时触发存档格式升级提示。详见 `MODULES.md` 模块五 G4。
 
+## D2 信息结构开发约定（2026-09-09）
+
+D2 是语言涌现的核心重构，分支 `feat/info-structure`。四大机制：学习瓶颈 / 任意性码本 / 信息不对称 / Steels 对齐。
+
+### 开发规则
+
+1. **渐进式开启**：禁止一次性开启全部机制验证。必须按 学习瓶颈+Steels → +码本 → +信息不对称 顺序，每步确认生态稳定。
+2. **D2 启用时走 Python 路径**：`use_sim_core=False`。Rust 侧暂未实现码本/学习瓶颈/softmax，后续逐步下沉，每步双路径对拍。
+3. **配置总开关**：`InfoStructureConfig.enabled=False`（默认），关闭时行为与旧版完全一致。新增参数必须有默认值且 `from_dict` 旧存档回退。
+4. **快照版本**：D2 后 `SNAPSHOT_VERSION=3`，新增 `codebook`/`learning_count`。旧快照加载时回退默认值。
+5. **码本是 uint8 (N,16)**：初始恒等映射 `codebook[state]=state`。Steels 对齐用离散概率替换（不能直接浮点运算）。
+6. **唯一验收门**：g15 无手调补贴从 0.5 上升（3 seed 一致）。其他指标（cult_div/trust/signal_density）为辅助观察。
+
+### 实验工具
+
+- `experiments/run_d2_experiment.py`：D2 参数调优专用脚本，支持四大机制独立开关 + 全部参数 CLI 透传 + 自动 manifest + CSV。
+- 详细调优方案见 `评估-EVAL-D2参数调优实验指南-20260909.md`。
+
+### 禁止事项
+
+- 禁止在 D2 启用时调用 Rust 路径的 `step_movement`/`signal_emit`/`reproduce_batch`（会忽略码本/学习瓶颈）。
+- 禁止把码本当浮点数组做 EWMA（uint8 离散映射，用概率替换）。
+- 禁止修改 `perception_radius` 为非 4/6/8 的值（邻居索引逻辑只支持这三档）。
+
 ## 测试状态
 
-- 全量：152 passed, 1 skipped（双路径逐位对拍 + 快照 + 信号 + 愉悦度 + 繁殖 + L10a 果实-种子 + 基因注册表）
-- 快照：10/10（save/load + RNG 可复现 + 多次循环）
+- 全量：192 passed, 1 skipped（含 17 例 D2 单元测试 + 双路径逐位对拍 + 快照 + 信号 + 愉悦度 + 繁殖 + L10a + 基因注册表）
+- D2 信息结构：17/17（配置/数据结构/学习瓶颈/码本/信息不对称/Steels对齐/快照v3/向后兼容）
+- 快照：10/10（save/load + RNG 可复现 + 多次循环 + v3 兼容）
 - 信号发射：6/6（函数级对拍）
 - 愉悦度：5/5（函数级对拍）
 - 繁殖下沉：3/3（函数级对拍，T4）
