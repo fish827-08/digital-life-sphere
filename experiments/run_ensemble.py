@@ -104,6 +104,11 @@ def main():
     parser.add_argument("--signal-disabled", action="store_true")
     parser.add_argument("--signal-mode", type=str, default="state",
                         choices=["state", "random", "evolved"])
+    # 战役参数（透传给 run_long_experiment.py）
+    parser.add_argument("--lifespan-mult", type=float, default=1.0,
+                        help="寿命基准缩放（1.0=旧行为；范围(0.05,8]）")
+    parser.add_argument("--stay-prob", type=float, default=0.0,
+                        help="停驻率（0=旧行为；范围[0,0.95)）")
     args = parser.parse_args()
 
     tag = args.tag
@@ -133,6 +138,10 @@ def main():
             cmd_base += ["--signal-disabled"]
         if args.signal_mode != "state":
             cmd_base += ["--signal-mode", args.signal_mode]
+        if args.lifespan_mult != 1.0:
+            cmd_base += ["--lifespan-mult", str(args.lifespan_mult)]
+        if args.stay_prob != 0.0:
+            cmd_base += ["--stay-prob", str(args.stay_prob)]
         with sem:
             t0 = time.time()
             rc, err = 0, ""
@@ -187,6 +196,7 @@ def main():
         "tag": tag, "rows": args.rows, "cols": args.cols, "ticks": args.ticks,
         "segment": args.segment, "density_cap": args.density_cap,
         "rotation_period": args.rotation_period, "seeds": args.seeds,
+        "lifespan_mult": args.lifespan_mult, "stay_prob": args.stay_prob,
         "commit": _commit_hash(), "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "interpreter": sys.executable,
     }}

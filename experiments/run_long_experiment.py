@@ -58,6 +58,12 @@ def _make_config(args):
     # rotation_period 派生（_lifespan = day*(1+g3*7)），压缩于此同步提速世代
     if args.rotation_period:
         cfg.light.rotation_period = args.rotation_period
+    # 战役参数：lifespan_mult 寿命基准缩放（不动昼夜，直接压寿命→世代缩短）
+    if args.lifespan_mult != 1.0:
+        cfg.organisms.lifespan_mult = args.lifespan_mult
+    # 战役参数：stay_prob 停驻率（move_prob × (1-stay_prob)，等效扩世界）
+    if args.stay_prob != 0.0:
+        cfg.simulation.stay_prob = args.stay_prob
     # D1 零模型三开关
     cfg.neutral_genes = args.neutral_genes
     cfg.signal_disabled = args.signal_disabled
@@ -114,6 +120,11 @@ def main():
     parser.add_argument("--signal-mode", type=str, default="state",
                         choices=["state", "random", "evolved"],
                         help="D1 信号编码模式：state(现状)/random(独立rng随机)/evolved(D2码本暂未接线)")
+    # 战役参数（千代战役用：不动昼夜直接压寿命 + 停驻等效扩世界）
+    parser.add_argument("--lifespan-mult", type=float, default=1.0,
+                        help="寿命基准缩放（1.0=旧行为；0.25=寿命缩到1/4→世代×4；范围(0.05,8]）")
+    parser.add_argument("--stay-prob", type=float, default=0.0,
+                        help="停驻率（0=旧行为每tick必移判定；0.8=移动概率×0.2，等效扩世界；范围[0,0.95)）")
     args = parser.parse_args()
 
     n_cells = args.rows * args.cols

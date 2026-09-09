@@ -95,6 +95,7 @@ class OrganismConfig:
     senile_fraction: float = 0.75     # 老年年龄 = 寿命的几成 → 进入衰老期，维持费上升
     growth_mult: float = 1.6          # 未成年（幼体）每 tick 维持费倍率（在长身体，吃得多耗得多）
     senile_mult: float = 1.4          # 老年每 tick 维持费倍率（器官退化，维持费上升）
+    lifespan_mult: float = 1.0        # 寿命基准缩放（战役参数：不动昼夜，直接压寿命→世代缩短；1.0=旧行为）
     # 活性温度门（隐式选择压，审计标注 [隐含] → A2 收编）：
     # 冷血个体有效活动 = 环境活动 × (niche_floor + niche_gain × 温度适配度)。
     # 0.4 保底=即使完全不适配温度仍有 40% 活动 → 弱化 g11 温度偏好的选择梯度。
@@ -111,6 +112,7 @@ class OrganismConfig:
         )
         assert self.growth_mult >= 1.0, "幼体代谢倍率至少 1"
         assert self.senile_mult >= 1.0, "老年代谢倍率至少 1"
+        assert 0.05 < self.lifespan_mult <= 8.0, "lifespan_mult 在 (0.05, 8.0]"
 
 
 @dataclass
@@ -150,9 +152,11 @@ class SimulationConfig:
     history_limit: int = 0          # 统计历史保留上限（0=无限，长程实验用环形尾部）
     use_sim_core: bool = False      # True=种群数值管线走 Rust（sim_core.step_vectors）
     social_move_weight: float = 1.0 # 移动决策群居项权重（D0 修复：densities 按邻居上限归一化后与感知项同量级，此项可扫描 0~2）
+    stay_prob: float = 0.0          # 停驻率（战役参数：move_prob × (1-stay_prob)，0=旧行为每tick必移判定；配合D2感知半径4=等效扩世界）
 
     def __post_init__(self) -> None:
         assert self.ticks >= 1, "至少跑一个 tick"
+        assert 0.0 <= self.stay_prob < 0.95, "stay_prob 在 [0, 0.95)"
 
 
 @dataclass

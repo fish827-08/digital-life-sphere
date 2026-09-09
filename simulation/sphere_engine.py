@@ -399,14 +399,16 @@ class SphereEngine:
     # ---- 数值平衡：寿命与昼夜 ---------------------------------------------
 
     def _lifespan(self, g3: NDArray[np.float64]) -> NDArray[np.float64]:
-        """寿命（tick）= 一昼夜 × (1 + g3×7) → 最短 1 昼夜，最长 8 昼夜。
+        """寿命（tick）= 一昼夜 × lifespan_mult × (1 + g3×7)。
 
         用"昼夜长度"做基准而非绝对 tick 数：昼夜设置（rotation_period）
         调整时，寿命自动跟着缩放，保证生物始终能经历若干完整昼夜。
         g3=0 最少活满一昼夜（对昼夜有反应）；g3=1 最多八昼夜（慢热长寿）。
+        lifespan_mult（战役参数）：不动昼夜，直接缩放寿命基准→世代缩短。
         """
         day = float(self.config.light.rotation_period)
-        return day * (1.0 + g3 * 7.0)
+        mult = float(self.config.organisms.lifespan_mult)
+        return day * mult * (1.0 + g3 * 7.0)
 
     # ---- 单 tick 种群推进（核心热循环） -----------------------------------
 
@@ -452,6 +454,9 @@ class SphereEngine:
 
         # 1)~3) 光合 / 代谢 / 维持 —— 双路径（Rust stage1 逐位等价，或 Python 原实现）
         day_len = float(self.config.light.rotation_period)
+        # lifespan_mult：Rust 零改动方案——把 day_len 参数传 day_len×mult，
+        # Rust 内部用 day_len 推导成熟/老年年龄，等效压缩寿命，Rust 无感、ABI 不变。
+        _day_len_eff = day_len * float(self.config.organisms.lifespan_mult)
         if self._use_sim_core:
             self._sim_core.step_vectors_stage1(
                 energy, stomach, genes, eff_activity,
@@ -460,7 +465,7 @@ class SphereEngine:
                 ocfg.photo_max, ocfg.base_metabolism, ocfg.eat_efficiency,
                 ocfg.growth_mult, ocfg.senile_mult,
                 ocfg.maturity_fraction, ocfg.senile_fraction,
-                ocfg.homeo_upkeep, day_len,
+                ocfg.homeo_upkeep, _day_len_eff,
             )
         else:
             # 1) 光合收入（g8）：少量、随光照。
@@ -632,7 +637,10 @@ class SphereEngine:
         # 5) 移动：g19 植物化降低移动概率（g0 × (1-g19)）
         #    use_sim_core=True：移动决策下沉到 Rust（step_movement），移动耗能在 Rust 内扣；
         #    stage2 只做年龄/冷却（moved_raw 全 False，不重复扣移动耗能）。
-        move_prob = genes[:, Gene.MOVE_PROB] * (1.0 - genes[:, Gene.ROOTING])
+        #    stay_prob（战役参数）：move_prob × (1-stay_prob)，统一调低移动概率=等效扩世界。
+        #    RNG 契约：保持每 tick 消费 P 个 uniform 不变（rng.random(P) 原样），只改阈值。
+        _stay = float(self.config.simulation.stay_prob)
+        move_prob = genes[:, Gene.MOVE_PROB] * (1.0 - genes[:, Gene.ROOTING]) * (1.0 - _stay)
         move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, Gene.MOVE_COST])
         # D2-3 信息不对称：感知半径4/噪声/softmax 暂未下沉 Rust，启用时走 Python 路径
         _ifcfg = self.config.info_structure
@@ -649,7 +657,7 @@ class SphereEngine:
                 energy, self._age[:P], self._repro_cooldown[:P], genes,
                 np.zeros(P, dtype=bool), move_cost_ind,
                 out_moved, out_starved, out_expired, out_repro,
-                day_len, ocfg.maturity_fraction, ocfg.max_energy,
+                _day_len_eff, ocfg.maturity_fraction, ocfg.max_energy,
             )
             if len(mi) > 0:
                 # 预计算环境量
