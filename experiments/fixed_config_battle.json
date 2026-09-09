@@ -1,0 +1,35 @@
+{
+  "_comment": "D3世代压缩扫描定案 — 千代战役统一配置，禁止各seed手改参数",
+  "battle_config": {
+    "rotation_period": 150,
+    "_rationale": "D3扫描rp=300时88代/200k(2273tick/代)，线性外推(压缩效率91%)rp=150预计~176代/200k=880代/100万tick，接近1000代目标。需先做1seed×100k快速验证生态稳定性。",
+    "lifespan_range_tick": [150, 1200],
+    "_lifespan_note": "寿命=rotation_period×(1+g3×7)，rp=150时寿命150~1200 tick(0.06~0.5世界日)",
+    "maturity_tick": "寿命×15% = 22.5~180 tick",
+    "world": {"rows": 60, "cols": 120, "n_cells": 7200},
+    "population": {"initial": 500, "density_cap": 0.45, "max_count": 3240},
+    "ticks": 1000000,
+    "segment": 50000,
+    "seeds": [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+  },
+  "d3_scan_results": {
+    "rp2400": {"max_gen": 12, "interval_tick_per_gen": 16666, "g15_mean": 0.467, "ecology": "stable", "note": "对照"},
+    "rp1200": {"max_gen": 23, "interval_tick_per_gen": 8695, "g15_mean": 0.379, "ecology": "stable", "note": "压缩效率96%"},
+    "rp600":  {"max_gen": 45, "interval_tick_per_gen": 4444, "g15_mean": 0.643, "ecology": "stable", "note": "最佳平衡档，选择梯度最明显，2seed可重复"},
+    "rp300":  {"max_gen": 88, "interval_tick_per_gen": 2273, "g15_mean": 0.589, "ecology": "stable_but_drift", "note": "漂变过强：seed间g16从0.18到0.93，奠基者效应主导"}
+  },
+  "extrapolation": {
+    "rp150": {"estimated_max_gen_per_200k": 176, "estimated_per_1M": 880, "confidence": "外推，需验证生态稳定性", "method": "rp=300→88代，线性外推×2(压缩效率91%)"},
+    "rp100": {"estimated_max_gen_per_200k": 264, "estimated_per_1M": 1320, "confidence": "外推，生态稳定性未知", "method": "rp=300→88代，线性外推×3(压缩效率91%)"}
+  },
+  "fallback": {
+    "if_rp150_ecology_collapses": "回退到rp=300(已验证生态稳定，440代/100万tick)，或rp=600(225代，选择梯度最佳)",
+    "validation_command": "python experiments/run_long_experiment.py --rows 60 --cols 120 --ticks 100000 --segment 50000 --tag rp150_validate --seed 42 --rotation-period 150"
+  },
+  "manifest": {
+    "based_on": "results/gen_scan/D3-世代压缩敏感性扫描报告-20260909.md",
+    "branch": "feat/gen-scan",
+    "commit": "54c392a",
+    "decided_at": "2026-09-09"
+  }
+}

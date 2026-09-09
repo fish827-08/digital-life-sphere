@@ -56,6 +56,44 @@ def _commit_hash() -> str:
         return "unknown"
 
 
+def _file_md5(path: Path) -> str:
+    """文件 MD5 hash（用于 sim_core.so / 输入快照 指纹）。"""
+    if not path.exists():
+        return "none"
+    import hashlib
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()[:12]
+
+
+def _sim_core_fingerprint() -> dict:
+    """sim_core 编译产物指纹：文件 hash + 大小 + mtime。"""
+    so_path = PROJECT_ROOT / "sim_core.so"
+    if not so_path.exists():
+        return {"status": "not_built", "path": str(so_path)}
+    stat = so_path.stat()
+    return {
+        "status": "built",
+        "md5": _file_md5(so_path),
+        "size_bytes": stat.st_size,
+        "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+    }
+
+
+def _input_snapshot_hash(tag: str, seeds: list[int]) -> dict:
+    """输入快照 hash（每个 seed 的快照文件，如果存在则记录）。"""
+    result = {}
+    for s in seeds:
+        snap = PROJECT_ROOT / f"snapshot_{tag}_s{s}.npz"
+        if snap.exists():
+            result[str(s)] = {"md5": _file_md5(snap), "size_bytes": snap.stat().st_size}
+        else:
+            result[str(s)] = {"md5": "none", "note": "fresh_init（无输入快照）"}
+    return result
+
+
 def _last_row(csv_path: Path) -> dict:
     """读 CSV 最后一行 → dict（列名 → 值，数值转 float）。文件不存在返回 {}。"""
     if not os.path.exists(csv_path):
@@ -178,6 +216,16 @@ def main():
         "rotation_period": args.rotation_period, "seeds": args.seeds,
         "commit": _commit_hash(), "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "interpreter": sys.executable,
+        # D5 C1 manifest 扩展：复现追踪必需字段
+        "sim_core": _sim_core_fingerprint(),
+        "input_snapshots": _input_snapshot_hash(tag, args.seeds),
+        "full_config": {
+            "neutral_genes": getattr(args, "neutral_genes", False),
+            "signal_disabled": getattr(args, "signal_disabled", False),
+            "signal_mode": getattr(args, "signal_mode", "state"),
+            "initial_count": args.initial,
+            "use_patchy": True,
+        },
     }}
     summary["per_seed"] = per_seed
     summary["stats"] = _summary_stats([

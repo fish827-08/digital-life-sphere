@@ -38,6 +38,27 @@ cd .. && python3 -m pytest tests/ -q --ignore=tests/test_broker.py
 4. **快照兼容**：`save_snapshot`/`load_snapshot` 保存 gene_count 和配置指纹，
    扩 gene_count 会破坏旧快照兼容性。
 
+## G5 工程契约（D5 复现性基建，2026-09-09 固化）
+
+### G5.1 Python 参考实现降级为黄金测试预言机（不删除）
+
+`simulation/sphere_engine.py` 中的纯 Python 实现是**黄金参考（oracle）**，永远不删除、不简化。
+
+- Rust 下沉的正确性唯一验证手段是与 Python 参考实现逐位对拍。
+- 性能优化只能在 Rust 侧做，Python 侧保持可读、可审计、作为规范。
+- 对拍不一致时 **Rust 侧必须改到与 Python 一致**，除非有明确数学理由并经审查。
+- `use_sim_core=False` 路径必须始终可运行、可测试。
+
+### G5.2 RNG 用预生成数组按索引消费（禁用每线程独立 rng）
+
+所有随机数消费必须通过**预生成数组 + 索引**方式，禁止在循环/线程内创建独立 rng。
+
+- 每 tick 开始时预生成该 tick 所需全部随机数数组（`rng.random(P)` 等）。
+- 个体级随机消费通过数组索引（`rand_arr[i]`），禁止循环内调用 `rng.random()`。
+- Rust 侧接收 Python 预生成数组，禁止在 Rust 内创建 `rand::thread_rng()`。
+- 新增随机消费点必须在预生成阶段新增对应数组，并验证双路径 RNG 消费顺序一致。
+- "独立随机"需求（如 `signal_mode=random`）用固定种子偏移的独立 rng 预生成，不消费主 rng。
+
 ## 加基因五步曲（C3 G1）
 
 新增基因位必须按顺序执行（详见 `MODULES.md` 模块五）：
