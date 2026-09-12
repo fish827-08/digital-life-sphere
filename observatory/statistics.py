@@ -122,3 +122,80 @@ def generation_statistics(engine) -> GenerationStats:
         unique_genotypes=int(unique_count),
         unique_genotype_ratio=float(unique_count / n),
     )
+
+
+# ============================================================================
+# D2 信息结构指标（C4 口径统一：唯一权威实现）
+# ============================================================================
+
+def gene_mean(engine, locus: int) -> float:
+    """基因位点均值（g14=locus14, g15=locus15）。空种群返回 0.0。"""
+    n = len(engine._id)
+    if n == 0:
+        return 0.0
+    return float(np.asarray(engine._genes)[:, locus].mean())
+
+
+def trust_mean(engine) -> float:
+    """trust 均值。空种群返回 0.0。"""
+    n = len(engine._id)
+    if n == 0:
+        return 0.0
+    return float(np.asarray(engine._trust).mean())
+
+
+def learning_count_max(engine) -> int:
+    """最大学习计数（lc_max）。空种群返回 0。"""
+    n = len(engine._id)
+    if n == 0:
+        return 0
+    return int(np.asarray(engine._learning_count).max())
+
+
+def codebook_convergence(codebook: np.ndarray) -> float:
+    """群体码本趋同度（0~1，1=完全一致）。空码本返回 0.0。
+
+    对每个内部状态（16 个），计算最常见映射值的占比，再取 16 个状态的均值。
+    """
+    if len(codebook) == 0:
+        return 0.0
+    conv = []
+    for state in range(16):
+        mappings = np.asarray(codebook)[:, state].astype(int)
+        most_common = int(np.bincount(mappings, minlength=16).max())
+        conv.append(most_common / len(mappings))
+    return float(np.mean(conv))
+
+
+@dataclass(frozen=True)
+class D2Metrics:
+    """D2 实验的一个观测点（C4 统一口径，字段与 CSV 列名一致）。"""
+    tick: int
+    N: int
+    g14: float
+    g15: float
+    trust: float
+    max_gen: int
+    lc_max: int
+    codebook_conv: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def d2_metrics(engine, tick: int) -> D2Metrics:
+    """从引擎当前状态一次性计算全部 D2 指标（唯一权威入口）。
+
+    所有实验脚本应调用本函数，不得在脚本中重复计算 g14/g15/trust 等。
+    """
+    n = len(engine._id)
+    return D2Metrics(
+        tick=int(tick),
+        N=n,
+        g14=gene_mean(engine, 14),
+        g15=gene_mean(engine, 15),
+        trust=trust_mean(engine),
+        max_gen=int(np.asarray(engine._generation).max()) if n > 0 else -1,
+        lc_max=learning_count_max(engine),
+        codebook_conv=codebook_convergence(np.asarray(engine._codebook)) if n > 0 else 0.0,
+    )

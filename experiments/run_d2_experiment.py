@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 from simulation.config import SimConfig, InfoStructureConfig  # noqa: E402
 from simulation.sphere_engine import SphereEngine  # noqa: E402
+from observatory.statistics import d2_metrics  # noqa: E402  C4 统一口径
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,18 +115,6 @@ def build_config(args: argparse.Namespace) -> SimConfig:
         d2.softmax_tau = 0.0
     cfg.info_structure = d2
     return cfg
-
-
-def codebook_convergence(codebook: np.ndarray) -> float:
-    """计算群体码本趋同度（0~1，1=完全一致）。"""
-    if len(codebook) == 0:
-        return 0.0
-    conv = []
-    for state in range(16):
-        mappings = codebook[:, state].astype(int)
-        most_common = int(np.bincount(mappings, minlength=16).max())
-        conv.append(most_common / len(mappings))
-    return float(np.mean(conv))
 
 
 def main() -> None:
@@ -214,29 +203,26 @@ def main() -> None:
             break
 
         if tick % args.log_interval == 0 or tick == args.ticks:
-            P = len(engine._id)
-            g15 = float(engine._genes[:, 15].mean()) if P > 0 else 0.0
-            g14 = float(engine._genes[:, 14].mean()) if P > 0 else 0.0
-            trust = float(engine._trust.mean()) if P > 0 else 0.0
-            max_gen = int(engine._generation.max()) if P > 0 else 0
-            lc_max = int(engine._learning_count.max()) if P > 0 else 0
-            cb_conv = codebook_convergence(engine._codebook) if P > 0 else 0.0
+            # C4 统一口径：所有指标从 observatory.statistics.d2_metrics 取，
+            # 不在脚本中重复计算 g14/g15/trust/codebook_conv 等。
+            m = d2_metrics(engine, tick)
+            P = m.N
             elapsed = time.time() - t0
             rate = tick / elapsed if elapsed > 0 else 0
 
             row = {
-                "tick": tick, "N": P, "g14": round(g14, 4),
-                "g15": round(g15, 4), "trust": round(trust, 4),
-                "max_gen": max_gen, "lc_max": lc_max,
-                "codebook_conv": round(cb_conv, 4),
+                "tick": m.tick, "N": P, "g14": round(m.g14, 4),
+                "g15": round(m.g15, 4), "trust": round(m.trust, 4),
+                "max_gen": m.max_gen, "lc_max": m.lc_max,
+                "codebook_conv": round(m.codebook_conv, 4),
             }
             stats.append(row)
             w.writerow(row)
             csv_f.flush()
             print(
-                f"tick={tick:>6} N={P:>4} g15={g15:.3f} g14={g14:.3f} "
-                f"trust={trust:.3f} max_gen={max_gen:>3} lc_max={lc_max:>3} "
-                f"cb_conv={cb_conv:.3f} rate={rate:.1f}t/s"
+                f"tick={m.tick:>6} N={P:>4} g15={m.g15:.3f} g14={m.g14:.3f} "
+                f"trust={m.trust:.3f} max_gen={m.max_gen:>3} lc_max={m.lc_max:>3} "
+                f"cb_conv={m.codebook_conv:.3f} rate={rate:.1f}t/s"
             )
 
     csv_f.close()
