@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -129,13 +132,55 @@ def main() -> None:
     args = parse_args()
     cfg = build_config(args)
 
-    # 保存 manifest
+    # 保存 manifest（D-3/R22 自描述：含 commit/扩展指纹/全部开关真实状态）
     exp_dir = ROOT / "experiments"
     exp_dir.mkdir(exist_ok=True)
     manifest_path = exp_dir / f"manifest_{args.tag}_s{args.seed}.json"
+
+    # git commit（可复现性：数据对应哪个代码版本）
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(ROOT),
+            stderr=subprocess.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        git_commit = "unknown"
+
+    # sim_core.so sha256（扩展指纹：确认用的是哪个编译版本）
+    sim_core_path = ROOT / "sim_core.so"
+    if sim_core_path.exists():
+        h = hashlib.sha256()
+        with open(sim_core_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        sim_core_sha256 = h.hexdigest()
+    else:
+        sim_core_sha256 = "not_found"
+
+    # 全部开关真实状态（显式平铺，避免嵌套 config 中被忽略）
+    info = cfg.info_structure
+    switches = {
+        "d2_enabled": info.enabled,
+        "learning_bottleneck": info.learning_bottleneck,
+        "learning_rate": info.learning_rate,
+        "arbitrary_codebook": info.arbitrary_codebook,
+        "codebook_mutation_rate": info.codebook_mutation_rate,
+        "perception_radius": info.perception_radius,
+        "perception_noise": info.perception_noise,
+        "softmax_tau": info.softmax_tau,
+        "steels_alignment": info.steels_alignment,
+        "alignment_rate": info.alignment_rate,
+        "use_sim_core": cfg.simulation.use_sim_core,
+        "seed": cfg.seed,
+    }
+
     manifest = {
         "args": vars(args),
         "config": cfg.to_dict(),
+        "switches": switches,
+        "config_seed": args.seed,
+        "git_commit": git_commit,
+        "sim_core_sha256": sim_core_sha256,
         "start_time": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     with open(manifest_path, "w") as f:
