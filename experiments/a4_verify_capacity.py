@@ -41,30 +41,8 @@ from simulation.config import InfoStructureConfig, SimConfig  # noqa: E402
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
 
-def git_commit() -> str | None:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=str(ROOT), text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except Exception:
-        return None
-
-
-def sim_core_sha256() -> str | None:
-    """R22：记录 Rust 扩展二进制指纹（未安装/不可读时记 None，不静默省略）。"""
-    try:
-        import sim_core  # noqa: F401
-    except Exception:
-        return None
-    p = getattr(sys.modules["sim_core"], "__file__", None)
-    if not p or not os.path.exists(p):
-        return None
-    try:
-        with open(p, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()[:32]
-    except Exception:
-        return None
+# D-19：provenance 统一走 simulation.provenance（硬校验，不再本地静默 None/"unknown"）
+from simulation.provenance import collect as prov_collect, validate as prov_validate
 
 
 def build(mode: str, codebook: bool, seed: int, ticks: int) -> SphereEngine:
@@ -167,11 +145,11 @@ def main() -> None:
     reached = last >= args.ticks
     stable50k = bool(tail) and all(int(r["N"]) > 0 for r in tail) and last >= 10000
     dc = {str(k): int(v) for k, v in e.death_cause_totals().items()}
+    prov = prov_collect(e.config, rng_draws=int(e.rng_draws))
+    prov_validate(prov, require_sim_core=bool(e.config.simulation.use_sim_core))
     summary = {
         "manifest": {
-            "git_commit": git_commit(),
-            "sim_core_sha256": sim_core_sha256(),
-            "config_fingerprint": e.config.fingerprint(),
+            **prov,
             "started": started, "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
             "script": "experiments/a4_verify_capacity.py",
         },

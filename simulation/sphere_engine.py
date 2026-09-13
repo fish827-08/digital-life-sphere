@@ -42,6 +42,7 @@ from numpy.typing import NDArray
 from core.lifecycle import DeathCause
 from simulation.config import SimConfig
 from simulation.genes import Gene
+from simulation.provenance import CountingRNG
 from simulation.tick import TickStats
 from world.light_and_temperature import LightAndTemperature
 from world.resource_field import ResourceField
@@ -131,7 +132,9 @@ class SphereEngine:
 
     def __init__(self, config: SimConfig) -> None:
         self.config = config
-        self.rng = np.random.default_rng(config.seed)
+        # D-19：用 CountingRNG 包一层——**随机流逐位不变**，只统计抽取次数（rng_draws），
+        # 供 provenance 机械校验"两条路径/两次重跑是否消费了同一条随机流"（V-1 O-6）。
+        self.rng = CountingRNG(np.random.default_rng(config.seed))
         # D2 可复现性：感知噪声/Steels 配对使用全局 np.random（非主 rng），
         # 必须随 config.seed 播种，否则同 seed 两次运行结果不同（中高危可复现性漏洞）。
         np.random.seed(int(config.seed) & 0xFFFFFFFF)
@@ -278,6 +281,16 @@ class SphereEngine:
     @property
     def tick(self) -> int:
         return self._tick
+
+    @property
+    def rng_draws(self) -> int:
+        """主 RNG 累计抽取次数（D-19 / V-1 O-6）。
+
+        用于 provenance：同 seed 同配置的两条路径/两次重跑，`rng_draws` 必须相同，
+        否则就是消费了不同的随机流（可复现性/对拍出问题的机械信号）。
+        ⚠️ 只统计【主 rng】；D2 的感知噪声走全局 `np.random`（已知缺陷 F-D2），不计入。
+        """
+        return int(self.rng.draws)
 
     def alive_count(self) -> int:
         return len(self._id)
