@@ -73,3 +73,7 @@ data/snapshots/
 digital-life-sphere/
 
 the-world-data/
+
+# 2026-09-13 恢复过程残留
+_reclone_tmp/
+.git.corrupt-*/
