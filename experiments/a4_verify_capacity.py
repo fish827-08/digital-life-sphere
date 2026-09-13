@@ -112,6 +112,10 @@ def main() -> None:
     neutral = arm == "zero"
     sig_disabled = arm == "sigoff"
     oracle_on = arm == "oracle"
+    # R59/F-R9：control = 3 机制对照 ⇒ 关码本（arm 语义优先于 --codebook 默认值 1）。
+    # 若无此行，batch grid 只传 arm 时 control 会与 main 同配置同轨迹（2026-09-13 D-24 实测复现）。
+    if arm == "control":
+        args.codebook = 0
     measure = bool(args.measure) or arm is not None
 
     started = time.strftime("%Y-%m-%d %H:%M:%S")
