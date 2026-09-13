@@ -142,6 +142,19 @@ class SphereEngine:
 
     def __init__(self, config: SimConfig) -> None:
         self.config = config
+        # D-1（F1/R14）：perception_radius 显式校验。
+        # 原缺陷：dataclass __post_init__ 的 assert 只在构造时生效，
+        # 构造后直接赋值 c.perception_radius = 6 不触发校验；
+        # 使用处只判断 ==4，非 4 静默走 8 路径 → radius=6 静默 no-op。
+        # 现改为引擎入口处硬校验，非法值一律 ValueError。
+        _ifcfg = getattr(config, "info_structure", None)
+        if _ifcfg is not None and _ifcfg.enabled:
+            if _ifcfg.perception_radius not in (4, 8):
+                raise ValueError(
+                    f"F1 硬失败：info_structure.perception_radius={_ifcfg.perception_radius} 不合法，"
+                    f"只支持 4（Von Neumann）或 8（Moore）。"
+                    f"传入其他值会被静默当作 8 处理（no-op），已禁止。"
+                )
         # D-19：用 CountingRNG 包一层——**随机流逐位不变**，只统计抽取次数（rng_draws），
         # 供 provenance 机械校验"两条路径/两次重跑是否消费了同一条随机流"（V-1 O-6）。
         self.rng = CountingRNG(np.random.default_rng(config.seed))

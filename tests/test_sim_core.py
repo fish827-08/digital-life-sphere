@@ -8,7 +8,19 @@
 import numpy as np
 import pytest
 
-sim_core = pytest.importorskip("sim_core", reason="sim_core 未构建（需 maturin develop）")
+# F-V1（C5，D-2）：缺扩展 ⇒ 硬失败（不再 module-skip）。
+# 原 importorskip 会在 sim_core 未安装时静默跳过整文件，
+# 导致 Rust 加速核的对拍测试完全不被覆盖（"全绿"照不到盲区）。
+# 现改为硬失败，让扩展缺失在套件中明确可见。
+try:
+    import sim_core
+except ImportError as exc:  # pragma: no cover - 构建/环境问题
+    pytest.fail(
+        "F-V1 硬失败：sim_core 扩展未安装，Rust 加速核对拍测试将完全不被覆盖。"
+        " 请先在 sim_core/ 运行 `python -m maturin develop --release` 重建扩展。"
+        f" 原始错误：{exc}",
+        pytrace=False,
+    )
 
 from world.light_and_temperature import LightAndTemperature
 from world.resource_field import ResourceField
