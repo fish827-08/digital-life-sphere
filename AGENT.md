@@ -482,4 +482,40 @@ gitee 私有仓库  little-fishy/digital-life-sphere
 
 ---
 
+## 十一、仓库拆分记录（2026-09-13，所有者裁定）
+
+### 11.1 背景
+主仓库 `digital-life-sphere` 因 `.npz` 快照在历史中被**反复提交**，对象库累积 **470 MB**；
+远端未 GC 对象达 **1048 MB**，超过 Gitee 免费配额（1024 MB）⇒ **推送被 pre-receive 拒绝**。
+GC 无效（`.npz` 被历史引用，GC 只清未引用对象）。
+
+### 11.2 处置
+| 项 | 处置 |
+|----|------|
+| **主仓库** | **新建 `the-world`**：orphan 重建（历史从零），**181 文件 / 1.9 MB**（原 471 MB，降 99.6%） |
+| **数据仓库** | **新建 `the-world-data`**：**278 文件 / 85 MB**（快照 + 实验日志 + 产出） |
+| 旧仓库 | 转归档（remote 改名 `gitee-archive`），**不再推送** |
+| 旧历史 | 本地保留：tag `archive/pre-slim-main-20260913` + 备份 `.git.backup-20260913-pre-slim`（473 MB） |
+
+### 11.3 remote 配置（新）
+| remote | 地址 | 用途 |
+|--------|------|------|
+| **`gitee`** | `https://gitee.com/little-fishy/the-world.git` | ✅ **主仓库（唯一活跃，upstream）** |
+| `gitee-archive` | `https://gitee.com/little-fishy/digital-life-sphere.git` | 旧仓库（归档，禁推） |
+| `origin` | `git@github.com:fish827-08/digital-life-sphere.git` | GitHub（只读归档） |
+
+**数据仓库**：`https://gitee.com/little-fishy/the-world-data.git`（独立 remote，不在主仓库配置内）
+
+### 11.4 🔴 新纪律：实验数据不进主仓库
+
+1. **`.npz` / `.csv` / `.json`（快照、日志、实验产出）一律入 `the-world-data`**，不入主仓库
+2. 主仓库单文件 **< 100 MB**；总容量目标 **< 50 MB**
+3. 新数据产出后由 `[云端实验]` / `[本地开发]` **同步到数据仓库**
+4. **禁止**在主仓库用 `git add -f` 绕过 `.gitignore` 添加数据文件
+
+> **事故教训**：这批 `.npz` 是**逐个 commit 累积**出来的（每次实验保存一棵快照并提交），
+> 单次看只有 3–5 MB 不显眼，累积成 470 MB 后才发现——**容量问题要在单文件级别就拦住**。
+
+---
+
 *本文件由项目所有者授权建立。修改需所有者同意；成员之间的相互约束（§二）永久有效。*
