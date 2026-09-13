@@ -181,18 +181,20 @@ git push gitee HEAD:main                            # ② 发言后：立刻推�
 
 ---
 
-## 六、主项目目录与 ref 纪律
+## 六、主项目目录与 ref 纪律（**2026-09-13 迁移后更正**）
 
 | 项 | 值 |
 |----|-----|
-| **唯一主项目真身** | `_gitee_review/` |
-| ❌ 陈旧副本 | `digital-life-sphere/`（b896cc1，2026-09-08）、`_review/` |
-| ⚠️ 仅作对照 | `digital_life/`（第一代封存） |
-| 评估工作区 | `_eval/`、`_web_eval/`（不入主项目构建） |
-| **交流分支** | `collab/main`（远端 `gitee`） |
-| 开发分支 | `main` + feature 分支（本地/云端） |
+| **唯一主工作树（= 仓库真身）** | **`the-world/` 根**（`.git` 在根；分支 `main`） |
+| 引擎 + 文档 | 同在 `the-world/` 根 —— **`AGENT.md`（本文件）与 `AGENTS.md` 两份现均在根，各一份、受版本控制**（迁移前分处两目录、靠手工同步，是"规则不一致"的根因，现已根治） |
+| **实验数据仓库** | **`the-world/the-world-data/`**（嵌套独立仓库，主仓 `.gitignore` 已排除；数据不进主仓，见 §十一） |
+| 待清理残留 | `digital-life-sphere/`（detached `b896cc1`，09-08）、`_gitee_review/`（原 worktree 物理残留）、`.git.corrupt-20260913/`、`_reclone_tmp/` |
+| ⚠️ 仅作对照 | `digital_life/`（第一代封存，独立仓库） |
+| 评估工作区 | `_eval/`、`_web_eval/`、`_roadmap/`、`_advice/` —— **必须入库**（曾误加 `.gitignore`，已纠正） |
+| **远端** | **`gitee`** = `the-world`（唯一活跃，upstream）；`gitee-archive` = 旧仓库（**禁推**）；`origin`/`github` = 只读归档 |
+| ❌ 已取消 | `collab/main`（R9 封存；分支已删，回溯用标签 `archive/collab-main-20260912`） |
 
-**评估前必做**：`git log --oneline -1 gitee/main` 确认是否为新状态；本地 `main` 曾落后于 `gitee/main`。
+**发言/评估前必做**：`git fetch gitee && git log --oneline -1 gitee/main` 确认状态；本地曾多次落后于 `gitee/main`。
 
 ---
 
@@ -244,14 +246,21 @@ git add _share/ && git commit -m "share: <主题>" && git push gitee HEAD:main
 > ⚠️ 本项目已多次因"多份副本"出问题（`digital-life-sphere/` 陈旧副本、`_share_远端讨论板.md` 散落副本、双分支镜像冲突）。
 > **任何第 N 份拷贝都会变成陈旧副本。`_share/` 只有一个家：`gitee/main`。**
 > 本节历史：旧版曾写"唯一权威 = `gitee/collab/main`"→ 2026-09-12 改为 `main` + 双分支镜像 → R9 取消镜像，`main` 单分支权威。
-### 7.2 与 `_gitee_review/AGENTS.md` 的区别（勿混淆）
+### 7.2 与 `AGENTS.md` 的区别（**两份文件，勿混淆**）
 
-| 文件 | 位置 | 作用 |
-|------|------|------|
-| **`AGENT.md`**（本文件，单数） | `the-world/` 根 + `collab/main` | **团队协作章程**：谁做什么、交流规则、评审红线 |
-| `AGENTS.md`（复数） | `_gitee_review/`（主项目内） | **工程代理指南**：构建命令、加基因五步曲、代码约束 |
+> **2026-09-13 更正**：迁移前两者分处 `the-world/` 根 与 `_gitee_review/`；**现两份同在仓库根，各一份、均受版本控制**。
 
-两者**互不替代**：一个是"团队怎么合作"，一个是"代码怎么写"。
+| 文件 | 位置 | 作用 | 回答的问题 |
+|------|------|------|-----------|
+| **`AGENT.md`**（单数，本文件） | `the-world/AGENT.md` | **团队协作章程**：谁做什么、交流规则、评审红线、分支与仓库纪律 | **「团队怎么合作」** |
+| **`AGENTS.md`**（复数） | `the-world/AGENTS.md` | **工程代理指南**：构建命令、技术栈、加基因五步曲、D2 开发约定、条件表 C1–C5 | **「代码怎么写」** |
+
+两者**互不替代**，也**不互相覆盖**：
+- 改协作规则（流程/纪律/裁决）→ `AGENT.md`
+- 改工程约定（构建/基因/参数/机制开关）→ `AGENTS.md`
+- 涉及两者的（如"实验数据不进主仓"）→ 在 `AGENT.md` 定纪律、在 `AGENTS.md` 记操作细节，并互相引用
+
+**命名易混提示**：单数 `AGENT.md` = 给**人/角色**看的章程；复数 `AGENTS.md` = 给**编码代理**看的指南（沿袭社区 `AGENTS.md` 约定）。
 
 ### 7.3 仓库架构（R9 裁定后）
 
