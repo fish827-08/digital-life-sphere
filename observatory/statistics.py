@@ -122,3 +122,42 @@ def generation_statistics(engine) -> GenerationStats:
         unique_genotypes=int(unique_count),
         unique_genotype_ratio=float(unique_count / n),
     )
+
+# ---- D-16：R31③/R38③ 要求入 CSV 的两个判据列（单一实现，供所有 runner 调用） ----
+
+def codebook_convergence(codebook) -> float:
+    """群体码本趋同度（0~1，1=完全一致）。
+
+    对每个 state(0..15)，取群体中最常见映射的占比，再对 16 个 state 求均值。
+    含义：**码本是否已收敛成"公共词典"**——这是"任意性码本"这一条件的可观测量。
+    ⚠️ `arbitrary_codebook=False` 时码本是恒等映射，本指标**恒为 1.0（常数）**，
+       不具判别力（内评 N3），故必须开码本才有意义。
+    """
+    import numpy as np
+
+    if codebook is None or len(codebook) == 0:
+        return 0.0
+    conv = []
+    for state in range(16):
+        mappings = np.asarray(codebook)[:, state].astype(int)
+        most_common = int(np.bincount(mappings, minlength=16).max())
+        conv.append(most_common / len(mappings))
+    return float(np.mean(conv))
+
+
+def predation_fraction(deaths) -> float:
+    """捕食死亡占全部死亡的比例（0~1；无死亡时为 0.0）。
+
+    R38③：用于**按捕食占死因分层**——饱和封顶区制与捕食主导区制不能直接合并比较。
+    `deaths` 为 `engine.death_cause_totals()` 之类的 {原因: 计数} 映射。
+    """
+    if not deaths:
+        return 0.0
+    total = 0
+    predation = 0
+    for cause, n in deaths.items():
+        n = int(n)
+        total += n
+        if str(cause).endswith("PREDATION"):
+            predation += n
+    return float(predation / total) if total else 0.0

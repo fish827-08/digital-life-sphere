@@ -43,6 +43,9 @@ from simulation.sphere_engine import SphereEngine  # noqa: E402
 
 # D-19：provenance 统一走 simulation.provenance（硬校验，不再本地静默 None/"unknown"）
 from simulation.provenance import collect as prov_collect, validate as prov_validate
+from observatory.statistics import (  # D-16：单一口径实现
+    codebook_convergence, predation_fraction,
+)
 
 
 def build(mode: str, codebook: bool, seed: int, ticks: int) -> SphereEngine:
@@ -103,7 +106,8 @@ def main() -> None:
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
 
-    fields = ["tick", "N", "g14", "g15", "trust", "max_gen", "mean_row", "polar_frac"]
+    fields = ["tick", "N", "g14", "g15", "trust", "max_gen", "mean_row", "polar_frac",
+              "codebook_conv", "pred_frac"]   # D-16：R31③/R38③ 判据列
     fh = out.open("a" if resumed else "w", encoding="utf-8", newline="")
     w = csv.DictWriter(fh, fieldnames=fields)
     if not resumed:
@@ -124,6 +128,9 @@ def main() -> None:
                 "max_gen": int(e._max_generation),
                 "mean_row": round(float(r.mean()), 3) if P else "",
                 "polar_frac": round(float(((r <= 5) | (r >= 54)).mean()), 4) if P else "",
+                # D-16：
+                "codebook_conv": round(codebook_convergence(e._codebook[:P]), 4) if P else "",
+                "pred_frac": round(predation_fraction(e.death_cause_totals()), 4),
             })
             fh.flush()
             last = t
@@ -176,6 +183,12 @@ def main() -> None:
             "eco_gate_pass": bool(reached and stable50k),
             "born_total": int(e.total_born), "died_total": int(e.total_died),
             "deaths_by_cause": dc,
+            # D-16：终局判据值（区制分层用：饱和封顶 vs 捕食主导）
+            "final_codebook_conv": (
+                round(codebook_convergence(e._codebook[: len(e._id)]), 4)
+                if len(e._id) else 0.0
+            ),
+            "final_pred_frac": round(predation_fraction(dc), 4),
         },
     }
     out.with_suffix(".summary.json").write_text(
