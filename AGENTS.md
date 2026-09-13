@@ -72,7 +72,7 @@ D2 是语言涌现的核心重构，分支 `feat/info-structure`。四大机制�
 ### 实验工具
 
 - `experiments/run_d2_experiment.py`：D2 参数调优专用脚本，支持四大机制独立开关 + 全部参数 CLI 透传 + 自动 manifest + CSV。
-- 详细调优方案见 `评估-EVAL-D2参数调优实验指南-20260909.md`。
+- 详细调优方案见 `docs/评估-EVAL/评估-EVAL-D2参数调优实验指南-20260909.md`。
 
 ### 禁止事项
 
