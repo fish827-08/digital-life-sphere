@@ -10,9 +10,14 @@
   python experiments/a4_verify_capacity.py --mode on --seed 42 --ticks 60000 --codebook 1 \
       --out _rerun_logs/a4_fix/asym_on_cb1_s42.csv --snapshot-every 5000
 
-断点续跑（快照）：
-  - 每 --snapshot-every tick 写一次 <out>.snapshot.npz + <out>.rngstate.pkl
-  - 中断后原命令重跑即自动续跑（读取已存在的快照，从 e._tick+1 继续）
+断点续跑（快照）—— ⚠️ **F-R7：快照默认被 `.gitignore` 排除**
+  R19 首批的快照因数据仓 `.gitignore` 含 `*.npz|*.pkl` 而**从未入库**，
+  直接后果是"本地接不上、只能从 0 重跑"，白丢约 9 小时。
+  ⇒ **D-23a 处置**：快照统一写到 `--snapshot-dir`（默认 `_rerun_logs/snap/`）下的
+  **固定文件名 `<tag>.snapshot.npz`（原地覆盖）**，该目录已在 `.gitignore` 中放开，
+  **暂停/中断时提交一次即可入库**；每 run 只 1 个文件（≈4–6 MB），10 run ≈ 40–60 MB。
+  ❌ 切勿放开 `*.npz` 通配：120 个/run × 4 MB ≈ 480 MB/run，会把仓库再撑爆。
+  中断后原命令重跑即自动续跑（读取已存在的快照，从 e._tick+1 继续）
   - --fresh 强制从 tick 0 重来
   ⚠️ D2 的感知噪声走【全局 np.random】（已知缺陷 F-D2），引擎快照不含它；
      故本脚本额外存取 np.random 状态，保证续跑与"不中断连续跑"**逐位一致**。
@@ -80,6 +85,8 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--snapshot-every", type=int, default=5000,
                     help="每 N tick 写一次快照（0=不写）")
+    ap.add_argument("--snapshot-dir", default="_rerun_logs/snap",
+                    help="D-23a：单一最新快照目录（固定文件名原地覆盖，已放开 gitignore）")
     ap.add_argument("--fresh", action="store_true",
                     help="忽略已有快照，从 tick 0 重跑")
     args = ap.parse_args()
@@ -88,8 +95,14 @@ def main() -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     prog = out.with_suffix(".progress.json")
-    snap = out.with_suffix(".snapshot.npz")
-    rngp = out.with_suffix(".rngstate.pkl")
+    # D-23a：单一最新快照（固定文件名、原地覆盖）落在已放开 gitignore 的目录；
+    # 兼容旧批次：新路径不存在时回退到 <out>.snapshot.npz（旧命名）。
+    snap = Path(args.snapshot_dir) / f"{out.stem}.snapshot.npz"
+    rngp = snap.with_suffix(".rngstate.pkl")
+    if not snap.exists():
+        legacy = out.with_suffix(".snapshot.npz")
+        if legacy.exists():
+            snap, rngp = legacy, out.with_suffix(".rngstate.pkl")
 
     # ---- 断点续跑：快照存在且非 --fresh 则从快照恢复 ----
     resumed = False

@@ -47,7 +47,7 @@ snapshot.npz
 long_run_*.csv
 long_run_*.txt
 
-_rerun_logs/
+_rerun_logs/*
 experiments/local_rerun_d2x.bat
 
 # === 2026-09-12 迁移后：本地副本/备份/独立仓库（不入主仓） ===
@@ -77,3 +77,11 @@ the-world-data/
 # 2026-09-13 恢复过程残留
 _reclone_tmp/
 .git.corrupt-*/
+
+# === D-23a（F-R7）：放开"单一最新快照"目录，使断点状态可入库 ===
+# 背景：R19 快照被忽略 ⇒ 本地接不上、只能从 0 重跑（白丢 ~9h）。
+# ⚠️ gitignore 后写者优先 ⇒ 这段必须放在 `*.npz` 之后才生效。
+# ❌ 切勿放开 *.npz 通配：120 个/run × 4 MB ≈ 480 MB/run，会把仓库再撑爆。
+!_rerun_logs/snap/
+!_rerun_logs/snap/*.npz
+!_rerun_logs/snap/*.pkl
