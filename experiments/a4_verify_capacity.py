@@ -191,7 +191,10 @@ def main() -> None:
             "signal_disabled": bool(e.config.signal_disabled),
         },
         "result": {
-            "final_tick": last, "final_N": len(e._id), "extinct": bool(e.extinct),
+            # ⚠️ 必须用引擎真实 tick，不能用 last（=最后一次【采样】的 tick）：
+            # log_interval 默认 1000，跑 1500 tick 时 last 会停在 1000 ⇒ final_tick 记错
+            # （60k 恰好是 1000 的倍数才一直没暴露）。R42/R38 判据依赖该字段。
+            "final_tick": int(e._tick), "final_N": len(e._id), "extinct": bool(e.extinct),
             "reached_60k": reached, "stable_N_gt0_last50k": stable50k,
             "eco_gate_pass": bool(reached and stable50k),
             "born_total": int(e.total_born), "died_total": int(e.total_died),
