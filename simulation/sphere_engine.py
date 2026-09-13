@@ -42,6 +42,7 @@ from numpy.typing import NDArray
 from core.lifecycle import DeathCause
 from simulation.config import SimConfig
 from simulation.genes import Gene
+from simulation.oracle import EMISSION_COST, apply_oracle, attribution_ok
 from simulation.provenance import CountingRNG
 from simulation.tick import TickStats
 from world.light_and_temperature import LightAndTemperature
@@ -116,6 +117,15 @@ class SphereEngine:
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
         "_fruit_grid", "_fruit_charge", "_seed_carried",  # L10a
+        # ---- D-17/D-18/D-8（⑤⑥ 探针 + oracle）----
+        # 按 _id 键控的终身账本（长度 = _next_id，只增不压缩；死亡个体保留行——
+        # R42"必须含死亡个体"）。槽位会被 :1163 死亡压缩重排 ⇒ 禁止槽位键控。
+        "_rs_children", "_rs_observed", "_rs_g15", "_rs_age", "_rs_energy",
+        "_rs_cc0", "_rs_cohort", "_emit_count", "_oracle_gain",
+        "_last_sender",                     # cell → 最近写入者的 _id（oracle 归因）
+        "_oracle_transfers", "_oracle_count",
+        "_resp_decisions", "_resp_exposed", "_resp_delta_sum", "_resp_flip",
+        "_measure_resp", "_oracle_on",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -262,6 +272,35 @@ class SphereEngine:
         self._fruit_charge = np.zeros(n, dtype=np.float64)  # 每植物的果实蓄力
         self._seed_carried = np.zeros(n, dtype=np.int32)  # 每动物携带种子数（L10b 完善）
 
+        # ---- D-17/D-18/D-8：按 _id 键控的终身账本（R42/V-7；死亡个体保留行）----
+        # 长度恒 = _next_id；出生时 append 零行；**绝不**随死亡压缩（否则丢死亡个体）。
+        z = lambda dt: np.zeros(n, dtype=dt)
+        self._rs_children = z(np.int32)   # 终身子代数（出生时给亲代 +1）
+        self._rs_observed = z(bool)       # ⑤ 首次观测标记
+        self._rs_g15 = z(np.float32)      # 观测时 g15
+        self._rs_age = z(np.int32)        # 观测时年龄
+        self._rs_energy = z(np.float32)   # 观测时能量（⑤ 控制变量）
+        self._rs_cc0 = z(np.int32)        # 观测时已生子代数（剩余 = children − cc0）
+        self._rs_cohort = z(np.uint8)     # 0=非饱和窗 / 1=饱和窗（诊断）
+        self._emit_count = z(np.int32)    # 终身发射次数（oracle 保本记账 + return_ratio 分母）
+        self._oracle_gain = z(np.float32)  # 终身已获 oracle 回馈（C-9 保本封顶）
+        self._last_sender = np.full(self.world.n_cells, -1, dtype=np.int64)
+        self._oracle_transfers = 0.0
+        self._oracle_count = 0
+        # D-18 ⑥ 探针累计器（纯观测；measure off 时恒零且零开销）
+        self._resp_decisions = 0
+        self._resp_exposed = 0
+        self._resp_delta_sum = 0.0
+        self._resp_flip = 0
+        self._measure_resp = bool(config.info_structure.measure_signal_response)
+        self._oracle_on = bool(config.oracle.enabled)
+        if self._oracle_on and self._use_sim_core:
+            # C-8：静默忽略会重演 R14"配置看似生效实则没生效" ⇒ 显式报错
+            raise RuntimeError(
+                "C-8(V-1)：use_sim_core=True 与 oracle.enabled=True 不兼容"
+                "（oracle 仅 Python 路径）——请 use_sim_core=False"
+            )
+
         # 出生位置：均匀随机格（不做地形障碍过滤，球面无障碍）
         self._flat = self.rng.integers(0, self.world.n_cells, size=n).astype(
             np.int64
@@ -382,6 +421,9 @@ class SphereEngine:
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
         born, died, deaths = self._step_population()
+        # D-17 ⑤：每 tick 末给"首次进入窗口"的存活个体记观测（含死亡个体靠 _id 账本留存）
+        if self._measure_resp:
+            self._observe_selection_cohort()
         return TickStats(
             tick=self._tick,
             population=len(self._id),
@@ -652,6 +694,11 @@ class SphereEngine:
                             # 旧版：pattern = state（恒等映射，硬编码状态函数）
                             patterns = state.astype(np.uint8)
                     self.signals.write_many(e_flat, patterns)
+                    if self._oracle_on:
+                        # D-8 归因记账：存 **_id** 而非槽位索引（死亡压缩会重排槽位，
+                        # 而归因窗口 persistence=10 tick 内发送者可能已死）。
+                        self._emit_count[self._id[emitters]] += 1
+                        self._last_sender[e_flat] = self._id[emitters]
 
         # 4.5) L10a 动物吃果实→能量转移（默认关闭；确定性数值管线，Rust 可下沉）
         if self.config.fruit.enabled:
@@ -815,7 +862,31 @@ class SphereEngine:
                         # 消费主rng一个uniform用于采样（保对拍）
                         u = self.rng.random()
                         cum = np.cumsum(probs)
-                        targets[i] = nb[int(np.searchsorted(cum, u))]
+                        chosen = min(int(np.searchsorted(cum, u)), len(nb) - 1)
+                        targets[i] = nb[chosen]
+                        # ---- D-18 ⑥ 探针（R43）：纯观测，零 RNG、零行为改变 ----
+                        # ⑥b = Δ_i = P(选中格|含信号) − P(选中格|去信号)；
+                        # "去信号"= 反事实去掉两路信号项（感知 sp×trust 项 + 解读 interp 项），
+                        # 保留噪声化 fr/群居/记忆（只去信号，不去噪声）。
+                        # 禁用 argmax 翻转作主口径（τ=0.15 是概率抽样，argmax 翻转系统性低估）。
+                        if self._measure_resp:
+                            self._resp_decisions += 1
+                            if (nb_sigs > 0).any():
+                                score_wo = perc * (fr * 0.5) + soc * densities[nb]
+                                if len(valid_mem) > 0:
+                                    score_wo = score_wo + 0.3 * perc * np.isin(
+                                        nb, valid_mem
+                                    ).astype(np.float64)
+                                exp_w = np.exp(
+                                    (score_wo - score_wo.max()) / ifcfg3.softmax_tau
+                                )
+                                probs_wo = exp_w / exp_w.sum()
+                                self._resp_exposed += 1
+                                self._resp_delta_sum += float(
+                                    probs[chosen] - probs_wo[chosen]
+                                )
+                                if int(np.argmax(score_wo)) != int(np.argmax(score)):
+                                    self._resp_flip += 1
                     elif score.max() - score.min() < 1e-9:
                         targets[i] = nb[int(rand_choice[i] % len(nb))]
                     else:
@@ -828,6 +899,11 @@ class SphereEngine:
                 has_food = food_ratio[target_cells] > ccfg.food_threshold
                 true_sig = had_signal & has_food
                 false_sig = had_signal & ~has_food
+                # 5.6.0) V-1 oracle 正向对照（R39/D-8）：利益对齐回馈。
+                # 位置=规格 §2.4（true_sig 之后、信任学习之前）；C-8 ⇒ 仅 Python 路径。
+                # 零 RNG、守恒；复用 :829 已算好的 true_sig（不新增判定逻辑）。
+                if self._oracle_on:
+                    self._oracle_after_move(mi, target_cells, had_signal, true_sig, energy)
                 self._trust[mi[true_sig]] = np.minimum(
                     1.0, self._trust[mi[true_sig]] + ccfg.trust_true
                 )
@@ -1116,6 +1192,10 @@ class SphereEngine:
 
             ids = np.arange(self._next_id, self._next_id + K, dtype=np.int64)
             self._next_id += K
+            # D-17：_id 键控账本同步扩行（子代零行）+ 亲代终身子代数 +1。
+            # ⚠️ 必须用 _id[ri]（键控），绝不用 ri 本身（死亡压缩会重排槽位）。
+            self._grow_id_arrays(K)
+            self._rs_children[self._id[ri]] += 1
             self._id = np.concatenate([self._id, ids])
             self._flat = np.concatenate([self._flat, self._flat[ri]])
             self._energy = np.concatenate([self._energy, child_energy])
@@ -1219,6 +1299,124 @@ class SphereEngine:
         if len(self._id) == 0:
             self._extinct = True
         return born, n_starved + n_expired + n_predation, Counter(deaths)
+
+    # ---- D-17/D-18/D-8：⑤ 观测账本 / oracle 回馈 / 统计访问器 -----------------
+
+    def _grow_id_arrays(self, k: int) -> None:
+        """出生时给全部 _id 键控账本扩 k 行（零初始化）。只增不压缩。"""
+        if k <= 0:
+            return
+        z = lambda dt: np.zeros(k, dtype=dt)
+        self._rs_children = np.concatenate([self._rs_children, z(np.int32)])
+        self._rs_observed = np.concatenate([self._rs_observed, z(bool)])
+        self._rs_g15 = np.concatenate([self._rs_g15, z(np.float32)])
+        self._rs_age = np.concatenate([self._rs_age, z(np.int32)])
+        self._rs_energy = np.concatenate([self._rs_energy, z(np.float32)])
+        self._rs_cc0 = np.concatenate([self._rs_cc0, z(np.int32)])
+        self._rs_cohort = np.concatenate([self._rs_cohort, z(np.uint8)])
+        self._emit_count = np.concatenate([self._emit_count, z(np.int32)])
+        self._oracle_gain = np.concatenate([self._oracle_gain, z(np.float32)])
+
+    def _observe_selection_cohort(self) -> None:
+        """D-17 ⑤：给"首次出现在某窗口的存活个体"记一行观测（预注册口径）。
+
+        - 窗口：`P < 0.9 × max_count` ⇒ 非饱和窗（cohort=0）；否则饱和窗（cohort=1，诊断用）。
+        - 每 _id 只记**首次**（之后不重复记）；包含本 tick 新生子代。
+        - 死亡个体行**永久保留**（_id 键控数组不压缩）⇒ 自动满足 R42"必须含死亡个体"。
+        - ⑤ 的被估量 = 观测时 g15 → **剩余终身繁殖数**（= children − cc0），
+          控年龄与能量；run 结束时仍存活者为右删失（均匀删失，仪器层可接受，已在 docstring 声明）。
+        """
+        P = len(self._id)
+        if P == 0:
+            return
+        max_count = self.config.population.max_count
+        cohort = 0 if P < 0.9 * max_count else 1
+        alive_ids = self._id
+        fresh = ~self._rs_observed[alive_ids]
+        if not fresh.any():
+            return
+        idx = alive_ids[fresh]
+        self._rs_observed[idx] = True
+        self._rs_g15[idx] = self._genes[fresh, Gene.SIGNAL_STRENGTH]
+        self._rs_age[idx] = self._age[fresh]
+        self._rs_energy[idx] = self._energy[fresh]
+        self._rs_cc0[idx] = self._rs_children[alive_ids[fresh]]
+        self._rs_cohort[idx] = cohort
+
+    def _oracle_after_move(self, mi, target_cells, had_signal, true_sig, energy) -> None:
+        """D-8 oracle：归因 + 保本封顶内的 S→R 能量转移（详见 simulation/oracle.py）。"""
+        ocfg = self.config.oracle
+        sel = true_sig if ocfg.require_food else had_signal
+        rc = mi[sel]
+        if len(rc) == 0:
+            return
+        cc = target_cells[sel]
+        s_ids = self._last_sender[cc]
+        win = attribution_ok(self.signals._age[cc], self.signals.duration, ocfg.persistence)
+        r_id = self._id[rc]
+        # id→slot 解析（死亡压缩重排槽位 ⇒ 禁用发射时槽位；已死/未知 ⇒ -1 跳过）
+        uniq, inv = np.unique(self._id, return_inverse=True)
+        pos = np.searchsorted(uniq, s_ids)
+        pos_c = np.minimum(pos, len(uniq) - 1)
+        found = (s_ids >= 0) & (uniq[pos_c] == s_ids)
+        s_slot = np.where(found, inv[pos_c], -1).astype(np.int64)
+        # C-9 保本封顶（每发送者终身）：剩余额度 = 成本×累计发射 − 已获回馈
+        valid = s_ids >= 0
+        safe = np.where(valid, s_ids, 0)
+        budget = np.where(
+            valid,
+            EMISSION_COST * self._emit_count[safe].astype(np.float64)
+            - self._oracle_gain[safe].astype(np.float64),
+            -1.0,
+        )
+        ok = found & win & (s_ids != r_id) & (budget > 0)
+        if not ok.any():
+            return
+        total, cnt, s_kept, g_kept = apply_oracle(
+            energy=energy,
+            receiver_slots=rc[ok].astype(np.int64),
+            sender_slots=s_slot[ok],
+            budget=budget[ok],
+            donation=ocfg.donation,
+        )
+        if cnt:
+            self._oracle_gain[self._id[s_kept]] += g_kept
+            self._oracle_transfers += total
+            self._oracle_count += cnt
+
+    def signal_response_stats(self) -> dict:
+        """D-18 ⑥ 三联报（累计口径）：⑥a 暴露率 / ⑥b mean Δ_i / ⑥ = ⑥a×⑥b + 翻转率。
+
+        t=0 时 ⑥≡0 不是 bug（信号场初始无标记，V-7 G-3）。argmax 翻转率仅辅助
+        （τ=0.15 概率抽样下主口径是 Δ 概率差，禁用 argmax 翻转作主判据——R43）。
+        """
+        dec = int(self._resp_decisions)
+        exp_ = int(self._resp_exposed)
+        a = (exp_ / dec) if dec else 0.0
+        b = (self._resp_delta_sum / exp_) if exp_ else 0.0
+        return {
+            "decisions": dec,
+            "exposed": exp_,
+            "resp_a_exposure": round(float(a), 6),
+            "resp_b_delta": round(float(b), 6),
+            "resp_triple": round(float(a * b), 6),
+            "argmax_flip_rate": round(
+                float(self._resp_flip / exp_) if exp_ else 0.0, 6
+            ),
+        }
+
+    def oracle_stats(self) -> dict:
+        """D-8 oracle 累计统计（O-4/O-7 判读 + manifest 必录 `oracle_return_ratio`）。"""
+        emissions = int(self._emit_count.sum())
+        denom = emissions * EMISSION_COST
+        ratio = (self._oracle_transfers / denom) if denom > 0 else 0.0
+        return {
+            "enabled": bool(self._oracle_on),
+            "transfers": round(float(self._oracle_transfers), 6),
+            "count": int(self._oracle_count),
+            "emissions": emissions,
+            "oracle_return_ratio": round(float(ratio), 6),
+        }
 
     # ---- L10a 果实-种子传播（数值管线先行版） -----------------------------
 
@@ -1482,6 +1680,27 @@ class SphereEngine:
         # _run_deaths 是 Counter，用 pickle 序列化
         data["run_deaths"] = np.array(pickle.dumps(dict(self._run_deaths)), dtype=object)
 
+        # --- 5.5 D-17/D-18/D-8 探针/oracle 状态（v3 追加键；旧快照加载时回退零值）---
+        # 续跑正确性关键：⑤ 的"已观测"标记、oracle 保本记账（_emit_count/_oracle_gain/
+        # _last_sender）必须随快照走，否则续跑后重复观测/归因失效（F-R7 同型教训）。
+        data["last_sender"] = self._last_sender.copy()
+        data["oracle_transfers"] = np.array(self._oracle_transfers)
+        data["oracle_count"] = np.array(self._oracle_count)
+        data["resp_decisions"] = np.array(self._resp_decisions)
+        data["resp_exposed"] = np.array(self._resp_exposed)
+        data["resp_delta_sum"] = np.array(self._resp_delta_sum)
+        data["resp_flip"] = np.array(self._resp_flip)
+        if self._measure_resp or self._oracle_on:
+            data["rs_children"] = self._rs_children.copy()
+            data["rs_observed"] = self._rs_observed.copy()
+            data["rs_g15"] = self._rs_g15.copy()
+            data["rs_age"] = self._rs_age.copy()
+            data["rs_energy"] = self._rs_energy.copy()
+            data["rs_cc0"] = self._rs_cc0.copy()
+            data["rs_cohort"] = self._rs_cohort.copy()
+            data["emit_count"] = self._emit_count.copy()
+            data["oracle_gain"] = self._oracle_gain.copy()
+
         # --- 6. RNG 状态（可复现的关键）---
         data["rng_state"] = np.array(
             pickle.dumps(self.rng.bit_generator.state), dtype=object
@@ -1608,6 +1827,33 @@ class SphereEngine:
         engine._run_born = int(data["run_born"])
         engine._run_died = int(data["run_died"])
         engine._run_deaths = Counter(pickle.loads(data["run_deaths"].item()))
+
+        # --- 8.6 恢复 D-17/D-18/D-8 探针/oracle 状态（旧快照回退零值/重建）---
+        engine._last_sender = (
+            data["last_sender"].copy()
+            if "last_sender" in data
+            else np.full(engine.world.n_cells, -1, dtype=np.int64)
+        )
+        engine._oracle_transfers = float(data["oracle_transfers"]) if "oracle_transfers" in data else 0.0
+        engine._oracle_count = int(data["oracle_count"]) if "oracle_count" in data else 0
+        engine._resp_decisions = int(data["resp_decisions"]) if "resp_decisions" in data else 0
+        engine._resp_exposed = int(data["resp_exposed"]) if "resp_exposed" in data else 0
+        engine._resp_delta_sum = float(data["resp_delta_sum"]) if "resp_delta_sum" in data else 0.0
+        engine._resp_flip = int(data["resp_flip"]) if "resp_flip" in data else 0
+        if "rs_children" in data:
+            engine._rs_children = data["rs_children"].copy()
+            engine._rs_observed = data["rs_observed"].copy()
+            engine._rs_g15 = data["rs_g15"].copy()
+            engine._rs_age = data["rs_age"].copy()
+            engine._rs_energy = data["rs_energy"].copy()
+            engine._rs_cc0 = data["rs_cc0"].copy()
+            engine._rs_cohort = data["rs_cohort"].copy()
+            engine._emit_count = data["emit_count"].copy()
+            engine._oracle_gain = data["oracle_gain"].copy()
+        else:
+            # 旧快照（无探针数组）：_id 键控账本扩到 _next_id（全零 = 未观测/未发射）
+            need = int(engine._next_id) - len(engine._rs_children)
+            engine._grow_id_arrays(need)
 
         # --- 9. 恢复 RNG 状态 ---
         rng_state = pickle.loads(data["rng_state"].item())

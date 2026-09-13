@@ -278,6 +278,11 @@ class InfoStructureConfig:
     alignment_step: float = 0.15          # 对齐步长（解读表向对方收敛的比例）
     alignment_noise: float = 0.02         # 对齐时附加噪声σ
 
+    # ---- D-18 ⑥ 探针（R43：信号响应率三联报）----
+    # 纯观测（零 RNG、零行为改变——有测试断言逐位一致）；只增每 tick 一点算术开销。
+    # False = 关闭（默认；完全无开销）。⑥a 暴露率 / ⑥b Δ_i / ⑥=⑥a×⑥b + argmax 翻转率辅助。
+    measure_signal_response: bool = False
+
     def __post_init__(self) -> None:
         assert self.perception_radius in (4, 8), "感知半径只支持4(Von Neumann)或8(Moore)"
         assert 0.0 <= self.learning_rate <= 1.0
@@ -290,6 +295,29 @@ class InfoStructureConfig:
         assert 0.0 <= self.alignment_rate <= 1.0
         assert 0.0 <= self.alignment_step <= 1.0
         assert self.alignment_noise >= 0
+
+
+@dataclass
+class OracleConfig:
+    """V-1 oracle 正向对照参数（R39 / D-8，利益对齐型 / Lewis 共利）。
+
+    默认 enabled=False（关闭时行为与旧版**逐位一致**，C-6 先例同
+    `reputation_weight`）。见 `simulation/oracle.py` 模块 docstring 与
+    `_share/规格-V1-oracle引擎级-20260913.md`（v1.2）。
+    """
+
+    enabled: bool = False              # 默认关；关闭时行为与旧版逐位一致
+    donation: float = 0.05             # 单次成功通信的能量转移量
+    persistence: int = 10              # 归因窗口（tick）；0 = 仅本 tick
+    require_food: bool = True          # True=利益对齐（落点须有食物）；False=仅"有人听"
+
+    def __post_init__(self) -> None:
+        assert self.donation >= 0, "donation 非负"
+        assert self.persistence >= 0, "persistence 非负"
+
+
+# 旧存档回退（oracle）：未知键忽略、缺失键用默认值。
+_ORACLE_FIELDS: frozenset = frozenset(f.name for f in fields(OracleConfig))
 
 
 # 旧存档回退（B1）：只接受当前 dataclass 已知字段——未知键忽略、缺失键用默认值。
@@ -355,6 +383,9 @@ class SimConfig:
     signal_disabled: bool = False        # 不发信号：发射概率恒0，接收/解读照常
     signal_mode: str = "state"           # 信号编码：state(现状)/random(独立rng随机)/evolved(D2码本暂未接线)
 
+    # ---- V-1 oracle 正向对照（R39 / D-8）；旧存档缺失回退默认关闭 ----
+    oracle: OracleConfig = field(default_factory=OracleConfig)
+
     # ---- 可复现性辅助：配置 ⇄ dict ------------------------------
 
     def to_dict(self) -> dict:
@@ -407,6 +438,14 @@ class SimConfig:
                 FruitConfig(**data["fruit"])
                 if "fruit" in data
                 else FruitConfig()
+            ),
+            # D-8：oracle 配置；旧存档缺失时回退默认关闭（C-6/C-7 先例同 reputation_weight）。
+            oracle=OracleConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("oracle") or {}).items()
+                    if k in _ORACLE_FIELDS
+                }
             ),
             # D1 零模型三开关；旧存档回退默认值。
             neutral_genes=data.get("neutral_genes", False),

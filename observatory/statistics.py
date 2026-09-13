@@ -161,3 +161,86 @@ def predation_fraction(deaths) -> float:
         if str(cause).endswith("PREDATION"):
             predation += n
     return float(predation / total) if total else 0.0
+
+
+# ---- D-17：⑤ 个体层选择梯度（R42 / V-7 §2.2 口径，单一实现） ----------------
+
+def _rankdata(x: np.ndarray) -> np.ndarray:
+    """平均秩（并列取平均），供 Spearman 用；纯 numpy，无 scipy 依赖。"""
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty(len(x), dtype=np.float64)
+    sx = x[order]
+    i = 0
+    while i < len(x):
+        j = i
+        while j + 1 < len(x) and sx[j + 1] == sx[i]:
+            j += 1
+        ranks[order[i : j + 1]] = (i + j) / 2.0 + 1.0
+        i = j + 1
+    return ranks
+
+
+def _fit_selection(g15, age, energy, fitness) -> dict:
+    """一个 cohort 的 ⑤ 拟合：OLS 斜率（控年龄+能量）+ Spearman ρ（未控）。"""
+    n = int(len(g15))
+    out = {
+        "n": n,
+        "slope_g15": None,
+        "spearman_rho": None,
+        "mean_g15": round(float(g15.mean()), 6) if n else None,
+        "mean_fitness": round(float(fitness.mean()), 6) if n else None,
+    }
+    if n < 10 or float(np.ptp(g15)) < 1e-12 or float(np.ptp(fitness)) < 1e-12:
+        return out  # 样本不足或零方差 ⇒ 不可估，返回 None（G-D 判"是否全 NaN"用）
+    X = np.column_stack([np.ones(n), g15, age, energy])
+    coef, *_ = np.linalg.lstsq(X, fitness, rcond=None)
+    rg, rf = _rankdata(g15), _rankdata(fitness)
+    rg = rg - rg.mean()
+    rf = rf - rf.mean()
+    denom = float(np.sqrt((rg**2).sum() * (rf**2).sum()))
+    rho = float((rg * rf).sum() / denom) if denom > 0 else 0.0
+    out["slope_g15"] = round(float(coef[1]), 6)
+    out["spearman_rho"] = round(rho, 6)
+    return out
+
+
+def selection_gradient(engine) -> dict:
+    """D-17 ⑤：个体层选择梯度 `g15 → 剩余终身繁殖数`（R42 / V-7 §2.2）。
+
+    被估量与口径（预注册，不得事后改）
+    --------------------------------
+    - **观测单元**：每个 `_id` 在其**首次存活且种群处于某窗口**的 tick 记一行
+      （g15 / 年龄 / 能量 / 当时已生子代数 cc0）。
+    - **被解释变量**：剩余终身繁殖数 = `_rs_children[id] − cc0`；
+      **死亡个体行永久保留**（`_id` 键控数组不随死亡压缩）⇒ 自动满足 R42
+      "必须含死亡个体"；run 末仍存活者为右删失（均匀删失，仪器层可接受）。
+    - **分层**：非饱和窗（`P < 0.9×max_count`）= 主口径 `non_sat`；
+      饱和窗 = **诊断** `sat_diagnostic`（该窗内繁殖是抽签——内评 V-7 G-2——
+      诊断预期给出假阴性斜率，两窗**不得合并**）。
+    - **估计**：OLS `fitness ~ 1 + g15 + age + energy` 取 g15 斜率（控年龄+能量，
+      V-7 §2.2）+ Spearman ρ（未控，辅助方向）。n<10 或零方差 ⇒ None。
+    - ⚠️ ⑤ 是**个体层选择梯度**，不是群体均值会涨（V-7 附注）；G-D 只要求
+      "非全 NaN 且方向可读"。
+    """
+    g15 = np.asarray(engine._rs_g15, dtype=np.float64)
+    age = np.asarray(engine._rs_age, dtype=np.float64)
+    energy = np.asarray(engine._rs_energy, dtype=np.float64)
+    children = np.asarray(engine._rs_children, dtype=np.float64)
+    cc0 = np.asarray(engine._rs_cc0, dtype=np.float64)
+    observed = np.asarray(engine._rs_observed, dtype=bool)
+    cohort = np.asarray(engine._rs_cohort)
+    fit = children - cc0
+    return {
+        "non_sat": _fit_selection(
+            g15[observed & (cohort == 0)],
+            age[observed & (cohort == 0)],
+            energy[observed & (cohort == 0)],
+            fit[observed & (cohort == 0)],
+        ),
+        "sat_diagnostic": _fit_selection(
+            g15[observed & (cohort == 1)],
+            age[observed & (cohort == 1)],
+            energy[observed & (cohort == 1)],
+            fit[observed & (cohort == 1)],
+        ),
+    }
