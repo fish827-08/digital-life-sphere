@@ -51,26 +51,34 @@ from simulation.provenance import collect as prov_collect, validate as prov_vali
 from observatory.statistics import (  # D-16：单一口径实现
     codebook_convergence, predation_fraction,
 )
+from observatory.statistics import selection_gradient  # D-17：⑤ 单一口径
 
 
-def build(mode: str, codebook: bool, seed: int, ticks: int) -> SphereEngine:
+def build(mode: str, codebook: bool, seed: int, ticks: int, *,
+          max_count: int = 5000, neutral: bool = False,
+          sig_disabled: bool = False, oracle: bool = False,
+          measure: bool = False) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
     c.simulation.history_limit = 100           # 环形缓冲，限内存（不改变语义）
     c.population.initial_count = 200           # R4 manifest 真实口径
-    c.population.max_count = 5000
+    c.population.max_count = max_count         # R41：标杆批口径 3240（⑤ 不饱和前提）
     c.resources.distribution = "uniform"       # R4 manifest 真实口径
     d2 = InfoStructureConfig(enabled=True)
     d2.learning_bottleneck = True
     d2.learning_rate = 0.05
     d2.arbitrary_codebook = codebook           # R19/V12：4 机制=True，3 机制对照=False
     d2.steels_alignment = True
+    d2.measure_signal_response = measure       # D-18 ⑥ 探针（纯观测）
     if mode == "off":                          # 对称对照：全感知/无噪声/argmax
         d2.perception_radius = 8
         d2.perception_noise = 0.0
         d2.softmax_tau = 0.0
     c.info_structure = d2
+    c.neutral_genes = neutral                  # 漂变零模型（冻结 g14/g15）
+    c.signal_disabled = sig_disabled           # 信号禁用臂
+    c.oracle.enabled = oracle                  # D-8 oracle 正向对照臂
     return SphereEngine(c)
 
 
@@ -89,7 +97,22 @@ def main() -> None:
                     help="D-23a：单一最新快照目录（固定文件名原地覆盖，已放开 gitignore）")
     ap.add_argument("--fresh", action="store_true",
                     help="忽略已有快照，从 tick 0 重跑")
+    # ---- D-24 小规格验证批（R47/R53）新臂型 ----
+    ap.add_argument("--arm", choices=("main", "control", "zero", "sigoff", "oracle"),
+                    default=None,
+                    help="main=4机制主臂 / control=3机制对照 / zero=漂变零模型(冻结g14g15) / "
+                         "sigoff=信号禁用 / oracle=正向对照（D-8）。指定即开 ⑥探针+⑤观测")
+    ap.add_argument("--max-count", type=int, default=5000,
+                    help="种群上限（R41：⑤ 不饱和前提=3240；R19 口径=5000）")
+    ap.add_argument("--measure", action="store_true",
+                    help="显式开 ⑤观测+⑥探针（--arm 已隐含）")
     args = ap.parse_args()
+
+    arm = args.arm
+    neutral = arm == "zero"
+    sig_disabled = arm == "sigoff"
+    oracle_on = arm == "oracle"
+    measure = bool(args.measure) or arm is not None
 
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     out = Path(args.out)
@@ -114,13 +137,16 @@ def main() -> None:
         start_tick = int(e._tick)
         resumed = start_tick > 0
     else:
-        e = build(args.mode, bool(args.codebook), args.seed, args.ticks)
+        e = build(args.mode, bool(args.codebook), args.seed, args.ticks,
+                  max_count=args.max_count, neutral=neutral,
+                  sig_disabled=sig_disabled, oracle=oracle_on, measure=measure)
         start_tick = 0
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
 
     fields = ["tick", "N", "g14", "g15", "trust", "max_gen", "mean_row", "polar_frac",
-              "codebook_conv", "pred_frac"]   # D-16：R31③/R38③ 判据列
+              "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
+              "resp_a", "resp_b", "oracle_ratio"]   # D-18⑥/D-8（累计口径）
     fh = out.open("a" if resumed else "w", encoding="utf-8", newline="")
     w = csv.DictWriter(fh, fieldnames=fields)
     if not resumed:
@@ -144,6 +170,10 @@ def main() -> None:
                 # D-16：
                 "codebook_conv": round(codebook_convergence(e._codebook[:P]), 4) if P else "",
                 "pred_frac": round(predation_fraction(e.death_cause_totals()), 4),
+                # D-18⑥/D-8（累计口径；未开探针时恒 0）
+                "resp_a": e.signal_response_stats()["resp_a_exposure"],
+                "resp_b": e.signal_response_stats()["resp_b_delta"],
+                "oracle_ratio": e.oracle_stats()["oracle_return_ratio"],
             })
             fh.flush()
             last = t
@@ -177,6 +207,11 @@ def main() -> None:
             "mode": args.mode, "seed": args.seed, "ticks_target": args.ticks,
             "resumed_from_snapshot": bool(resumed), "start_tick": start_tick,
             "arbitrary_codebook": bool(args.codebook),
+            "arm": arm,
+            "measure_signal_response": bool(measure),
+            "oracle_enabled": bool(oracle_on),
+            "oracle_donation": float(e.config.oracle.donation) if oracle_on else None,
+            "oracle_persistence": int(e.config.oracle.persistence) if oracle_on else None,
             "perception_radius": int(e.config.info_structure.perception_radius),
             "perception_noise": float(e.config.info_structure.perception_noise),
             "softmax_tau": float(e.config.info_structure.softmax_tau),
@@ -205,6 +240,12 @@ def main() -> None:
                 if len(e._id) else 0.0
             ),
             "final_pred_frac": round(predation_fraction(dc), 4),
+            # D-17 ⑤（R42）：非饱和窗主口径 + 饱和窗诊断（两窗不得合并）
+            "selection_gradient": selection_gradient(e),
+            # D-18 ⑥（R43）：三联报
+            "signal_response": e.signal_response_stats(),
+            # D-8 oracle（O-4/O-7）：manifest 必录 return_ratio
+            "oracle": e.oracle_stats(),
         },
     }
     out.with_suffix(".summary.json").write_text(

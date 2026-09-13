@@ -196,6 +196,14 @@ PRESETS = {
         fixed=["mode=on", "ticks=60000", "snapshot-every=5000"],
         template="_rerun_logs/a4_fix/asym_on_cb{codebook}_s{seed}.csv",
     ),
+    # D-24 小规格验证批（R47/R53）：5 臂 × 3 seed，max_count=3240（R41，⑤ 不饱和前提），
+    # 60k tick，--arm 隐含开 ⑤观测+⑥探针（oracle 臂另开 oracle）
+    "d24": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["arm=main,control,zero,sigoff,oracle", "seed=42,43,44"],
+        fixed=["mode=on", "ticks=60000", "max-count=3240", "snapshot-every=5000"],
+        template="_rerun_logs/d24/{arm}_s{seed}.csv",
+    ),
 }
 
 
@@ -295,6 +303,7 @@ def summarize(runs: list[Run], outdir: Path) -> None:
         rows.append({
             "arm": r.name,
             "codebook": sw.get("arbitrary_codebook"),
+            "arm_type": sw.get("arm"),
             "seed": sw.get("seed"),
             "final_N": res.get("final_N"),
             "eco_gate": res.get("eco_gate_pass"),
@@ -302,6 +311,12 @@ def summarize(runs: list[Run], outdir: Path) -> None:
             "regime": ("predation_dominant" if pred is not None and pred >= 0.9
                        else "non_predation"),
             "codebook_conv": res.get("final_codebook_conv"),
+            # D-17⑤ / D-18⑥ / D-8 oracle（R53 六门判读的原始量）
+            "slope_g15": (res.get("selection_gradient") or {}).get("non_sat", {}).get("slope_g15"),
+            "resp_a": (res.get("signal_response") or {}).get("resp_a_exposure"),
+            "resp_b": (res.get("signal_response") or {}).get("resp_b_delta"),
+            "resp_triple": (res.get("signal_response") or {}).get("resp_triple"),
+            "oracle_ratio": (res.get("oracle") or {}).get("oracle_return_ratio"),
             "wall_min": round(r.wall / 60, 1),
         })
     if not rows:
