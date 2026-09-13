@@ -504,7 +504,13 @@ GC 无效（`.npz` 被历史引用，GC 只清未引用对象）。
 | `gitee-archive` | `https://gitee.com/little-fishy/digital-life-sphere.git` | 旧仓库（归档，禁推） |
 | `origin` | `git@github.com:fish827-08/digital-life-sphere.git` | GitHub（只读归档） |
 
-**数据仓库**：`https://gitee.com/little-fishy/the-world-data.git`（独立 remote，不在主仓库配置内）
+**数据仓库**：`https://gitee.com/little-fishy/the-world-data.git`
+
+| 项 | 值 |
+|----|-----|
+| **本地路径** | **`the-world/the-world-data/`**（在主工作区内，2026-09-13 由平级目录移入——便于工作区内访问） |
+| 主仓库如何对待 | `.gitignore` 已排除 `the-world-data/`（**嵌套独立仓库，主仓库不追踪**） |
+| 操作方式 | `cd the-world/the-world-data && git ...`（它有自己的 `origin` 与 `main`） |
 
 ### 11.4 🔴 新纪律：实验数据不进主仓库
 
