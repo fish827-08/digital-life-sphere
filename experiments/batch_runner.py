@@ -216,12 +216,30 @@ def poll(running: list[Run]) -> None:
             continue
         running.remove(r)
         r.wall = time.time() - r._t0
-        if rc == 0 and summary_ok(r.summary):
+        # ---- F-R10：判据放宽（2026-09-15）----
+        # 旧判据 `rc == 0 and summary_ok` 会把"rc=1 假失败"误判为 failed 并触发重试。
+        # 假失败成因：a4 收尾删 progress.json 被环境 safe-delete 守卫 fail-closed 拒绝
+        # ⇒ 子进程退出码 1，而 **summary 早已先写、数据无损**。
+        # 新判据：summary 合法即可判 done。为防"读到上一轮的旧 summary"，
+        # 额外要求 summary 的 mtime **不早于本次启动时刻**（`_t0`）。
+        _fresh = True
+        try:
+            _fresh = r.summary.stat().st_mtime >= float(getattr(r, "_t0", 0.0)) - 1.0
+        except OSError:
+            _fresh = False
+        if summary_ok(r.summary) and _fresh:
             r.status = "done"
-            print(f"  ✅ {r.name}  done  {r.wall/60:.1f} min")
+            if rc == 0:
+                print(f"  ✅ {r.name}  done  {r.wall/60:.1f} min")
+            else:
+                r.note = f"⚠️ rc={rc}（summary 完整且为本轮产出 ⇒ 判 done；F-R10 假失败）"
+                print(f"  ✅ {r.name}  done（⚠️ rc={rc}，summary 完整）  {r.wall/60:.1f} min")
         else:
             r.status = "failed"
-            r.note = f"rc={rc}" + ("" if summary_ok(r.summary) else " summary缺失/不合法")
+            _why = "summary缺失/不合法"
+            if summary_ok(r.summary) and not _fresh:
+                _why = "summary 为旧文件（mtime 早于本次启动）"
+            r.note = f"rc={rc} {_why}"
             print(f"  ❌ {r.name}  FAILED ({r.note})  {r.wall/60:.1f} min")
 
 

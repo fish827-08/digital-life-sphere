@@ -153,6 +153,20 @@ def main() -> None:
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
               "resp_a", "resp_b", "oracle_ratio"]   # D-18⑥/D-8（累计口径）
+    # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
+    # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
+    # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
+    # main_s43 30 个重复 ⇒ 时序非单调，且**首轮完全看不出来**）。
+    # 改法：先截断到 `start_tick`（保留 tick ≤ start_tick 的行），再继续追加。
+    if resumed and out.exists():
+        _keep = [
+            r for r in csv.DictReader(out.open(encoding="utf-8"))
+            if str(r.get("tick", "")).isdigit() and int(r["tick"]) <= start_tick
+        ]
+        with out.open("w", encoding="utf-8", newline="") as _fh:
+            _w = csv.DictWriter(_fh, fieldnames=fields)
+            _w.writeheader()
+            _w.writerows(_keep)
     fh = out.open("a" if resumed else "w", encoding="utf-8", newline="")
     w = csv.DictWriter(fh, fieldnames=fields)
     if not resumed:
@@ -261,8 +275,25 @@ def main() -> None:
     }
     out.with_suffix(".summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    if prog.exists():
-        prog.unlink()
+    # ---- F-R10：收尾**不再删除** progress.json ----
+    # 原因（2026-09-15 D-24 实测）：删除会被环境 safe-delete 守卫 fail-closed 拒绝
+    # （作用域内累计删除超限 ⇒ 拒删并终止进程）⇒ 子进程 rc=1 **假失败**，
+    # 污染批次状态与退出码（数据无损：上一行 summary 已先写）。
+    # 改法：写"完成标记"覆盖 progress.json（不删文件 ⇒ 不触发守卫）。
+    # 顺序保证：summary 先写、标记后写 ⇒ **任何时刻**中断都不丢数据。
+    prog.write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "final_tick": int(e._tick),
+                "final_N": len(e._id),
+                "finished": summary["manifest"]["finished"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     s = summary["result"]
     print(f"[{args.mode} cb={args.codebook} s{args.seed}] tick={s['final_tick']} "
           f"N={s['final_N']} eco_gate={s['eco_gate_pass']} "
