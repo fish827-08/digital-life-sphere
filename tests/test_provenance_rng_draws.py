@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from simulation.config import SimConfig  # noqa: E402
 from simulation.provenance import (  # noqa: E402
-    CountingRNG, collect, git_commit, validate,
+    CountingRNG, code_tree_sha256, collect, git_commit, validate,
 )
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
@@ -103,3 +103,54 @@ def test_collect_records_rng_draws():
     prov = collect(e.config, rng_draws=e.rng_draws)
     assert prov["rng_draws"] == e.rng_draws
     validate(prov)
+
+
+# ---- D-19+ 代码树指纹（与浮动 HEAD 解耦）----
+
+def _fake_tree(tmp_path):
+    for d in ("simulation", "observatory"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "simulation" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "simulation" / "b.py").write_text("y = 2\n", encoding="utf-8")
+    (tmp_path / "observatory" / "c.py").write_text("z = 3\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_code_tree_hash_is_deterministic(tmp_path):
+    r = _fake_tree(tmp_path)
+    assert code_tree_sha256(r) == code_tree_sha256(r)
+    assert len(code_tree_sha256(r)) == 32
+
+
+def test_code_tree_hash_changes_when_code_changes(tmp_path):
+    """任一受控 .py 内容改动 ⇒ 指纹必须变（否则等于没有指纹）。"""
+    r = _fake_tree(tmp_path)
+    before = code_tree_sha256(r)
+    (r / "simulation" / "a.py").write_text("x = 2\n", encoding="utf-8")
+    assert code_tree_sha256(r) != before
+
+
+def test_code_tree_hash_ignores_pycache_and_untracked_dirs(tmp_path):
+    """`__pycache__` 与受控目录外的文件（如 _share/）不得影响指纹。"""
+    r = _fake_tree(tmp_path)
+    before = code_tree_sha256(r)
+    (r / "simulation" / "__pycache__").mkdir()
+    (r / "simulation" / "__pycache__" / "a.cpython-313.pyc").write_bytes(b"\x00\x01")
+    (r / "_share").mkdir()
+    (r / "_share" / "讨论板.md").write_text("x", encoding="utf-8")
+    assert code_tree_sha256(r) == before
+
+
+def test_code_tree_hash_matches_real_repo_content():
+    """真实仓库：同内容两次调用一致；且与 HEAD 无关（不因提交而变）。"""
+    h1 = code_tree_sha256()
+    h2 = code_tree_sha256()
+    assert h1 == h2 and len(h1) == 32
+
+
+def test_collect_and_validate_require_code_tree_hash():
+    prov = collect(SimConfig(seed=1))
+    assert prov["code_tree_sha256"] and len(prov["code_tree_sha256"]) == 32
+    validate(prov)
+    with pytest.raises(RuntimeError, match="code_tree_sha256"):
+        validate({k: v for k, v in prov.items() if k != "code_tree_sha256"})

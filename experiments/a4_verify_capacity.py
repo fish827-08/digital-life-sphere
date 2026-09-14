@@ -49,7 +49,7 @@ from simulation.sphere_engine import SphereEngine  # noqa: E402
 # D-19：provenance 统一走 simulation.provenance（硬校验，不再本地静默 None/"unknown"）
 from simulation.provenance import collect as prov_collect, validate as prov_validate
 from observatory.statistics import (  # D-16：单一口径实现
-    codebook_convergence, predation_fraction,
+    codebook_convergence, max_generation_current, predation_fraction,
 )
 from observatory.statistics import selection_gradient  # D-17：⑤ 单一口径
 
@@ -148,7 +148,9 @@ def main() -> None:
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
 
-    fields = ["tick", "N", "g14", "g15", "trust", "max_gen", "mean_row", "polar_frac",
+    fields = ["tick", "N", "g14", "g15", "trust",
+              "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
+              "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
               "resp_a", "resp_b", "oracle_ratio"]   # D-18⑥/D-8（累计口径）
     fh = out.open("a" if resumed else "w", encoding="utf-8", newline="")
@@ -168,7 +170,8 @@ def main() -> None:
                 "g14": round(float(e._genes[:P, 14].mean()), 4) if P else "",
                 "g15": round(float(e._genes[:P, 15].mean()), 4) if P else "",
                 "trust": round(float(e._trust[:P].mean()), 4) if P else "",
-                "max_gen": int(e._max_generation),
+                "max_gen": int(e._max_generation),          # R77：历史高水位（不回落）
+                "max_gen_cur": max_generation_current(e),   # R77：当刻最深（只看存活）
                 "mean_row": round(float(r.mean()), 3) if P else "",
                 "polar_frac": round(float(((r <= 5) | (r >= 54)).mean()), 4) if P else "",
                 # D-16：
@@ -244,6 +247,10 @@ def main() -> None:
                 if len(e._id) else 0.0
             ),
             "final_pred_frac": round(predation_fraction(dc), 4),
+            # R77：max_gen 两个口径**分名记录**（此前同一列名 `max_gen` 在不同脚本里
+            # 分别指"当刻最深"与"历史高水位"⇒ 跨脚本比较必错）
+            "final_max_gen_highwater": int(e._max_generation),
+            "final_max_gen_current": max_generation_current(e),
             # D-17 ⑤（R42）：非饱和窗主口径 + 饱和窗诊断（两窗不得合并）
             "selection_gradient": selection_gradient(e),
             # D-18 ⑥（R43）：三联报

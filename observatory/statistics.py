@@ -302,7 +302,34 @@ def d2_metrics(engine, tick: int) -> D2Metrics:
         g14=gene_mean(engine, 14),
         g15=gene_mean(engine, 15),
         trust=trust_mean(engine),
-        max_gen=int(np.asarray(engine._generation).max()) if n > 0 else -1,
+        max_gen=max_generation_current(engine),
         lc_max=learning_count_max(engine),
         codebook_conv=codebook_convergence(np.asarray(engine._codebook)) if n > 0 else 0.0,
     )
+
+
+# ============================================================================
+# R77：`max_gen` 口径化 —— 两个口径必须分名，禁止再用裸 `max_gen`
+# ============================================================================
+
+def max_generation_current(engine) -> int:
+    """**当刻最深**世代 = 当前存活个体的最大 `_generation`（空种群 ⇒ -1）。
+
+    与 `max_generation_highwater` 的区别（R77 立规的原因）：本函数只看**活人**，
+    谱系灭绝后它会**回落**；高水位不会。实验脚本若用同名 `max_gen` 混装两者，
+    跨脚本比较必然出错（D-24 实测：`d2_metrics` 用当刻口径、`a4_verify_capacity`
+    用高水位口径，却是同一个列名）。
+    """
+    n = len(engine._id)
+    if n == 0:
+        return -1
+    return int(np.asarray(engine._generation)[:n].max())
+
+
+def max_generation_highwater(engine) -> int:
+    """**历史高水位**世代 = 引擎 `_max_generation`（含已死者，永不回落）。
+
+    ⚠️ 它回答的是"**曾经**出现过第几代"，不是"现在最深第几代"。内评
+    `_eval/D24判读预析` §4.4 引用的 `max_gen`=117 属本口径。
+    """
+    return int(engine._max_generation)

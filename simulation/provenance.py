@@ -113,6 +113,47 @@ def sim_core_sha256() -> str | None:
         return hashlib.sha256(fh.read()).hexdigest()[:32]
 
 
+# 决定模拟语义的代码目录（改动其中任一 .py 都可能改变结果）
+CODE_TREE_DIRS: tuple[str, ...] = ("simulation", "observatory", "world", "core", "experiments")
+
+
+def code_tree_sha256(
+    repo_root: str | os.PathLike | None = None,
+    dirs: tuple[str, ...] = CODE_TREE_DIRS,
+) -> str:
+    """对决定模拟语义的 `.py` 代码树做**确定性哈希**（与 git HEAD 解耦）。
+
+    为什么需要（D-24 实测暴露的仪器缺陷）
+    ------------------------------------
+    `git_commit` 记的是**浮动 HEAD**：批跑窗口横跨数小时，期间任何提交（哪怕只改
+    讨论板一行）都会推动 HEAD ⇒ 同一批 run 出现多个 commit 值，**形似"批内混版本"
+    实为噪音**（D-24 实测 15 run 出现 6 个 commit，逐条 diff 后代码逐字节相同）；
+    而 `sim_core_sha256` 在 Python 路径下恒为 `None` ⇒ **没有任何字段能证明
+    "两批用的是同一份代码"**。本函数补上这个缺失的**内容指纹**：
+
+    - 同内容 ⇒ 同哈希（**与提交历史、HEAD、时间戳无关**）；
+    - 任一受控 `.py` 改动 ⇒ 哈希变化（与 SHA-1 提交号不同，它不因无关提交漂移）。
+
+    口径：按相对路径排序遍历 `dirs` 下的 `.py`（跳过 `__pycache__`），
+    对每个文件写入 `相对路径\\0内容\\0` 后整体 SHA-256，取前 32 位十六进制。
+    """
+    root = Path(repo_root or ROOT)
+    files: list[Path] = []
+    for d in dirs:
+        base = root / d
+        if base.is_dir():
+            files.extend(
+                p for p in base.rglob("*.py") if "__pycache__" not in p.parts
+            )
+    h = hashlib.sha256()
+    for p in sorted(files, key=lambda q: q.relative_to(root).as_posix()):
+        h.update(p.relative_to(root).as_posix().encode("utf-8"))
+        h.update(b"\0")
+        h.update(p.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()[:32]
+
+
 def collect(config, repo_root: str | os.PathLike | None = None,
             rng_draws: int | None = None, python_info: bool = True) -> dict:
     """收集 provenance 字典（不抛错；校验交给 `validate`）。"""
@@ -122,6 +163,9 @@ def collect(config, repo_root: str | os.PathLike | None = None,
         "git_commit": git_commit(repo_root),
         "git_dirty": git_dirty(repo_root),
         "sim_core_sha256": sim_core_sha256(),
+        # D-19+：代码树内容指纹（与浮动 HEAD 解耦；Python 路径下 sim_core_sha256
+        # 恒 None，此前**没有任何代码指纹字段**）
+        "code_tree_sha256": code_tree_sha256(repo_root),
         "config_fingerprint": config.fingerprint(),
     }
     if rng_draws is not None:
@@ -139,7 +183,7 @@ def validate(prov: dict, require_sim_core: bool = False) -> None:
         require_sim_core: True 时要求 Rust 扩展指纹存在（走 Rust 路径的批次应开）
     """
     forbidden = {"unknown", "", None, "None"}
-    for key in ("git_commit", "config_fingerprint"):
+    for key in ("git_commit", "config_fingerprint", "code_tree_sha256"):
         if key not in prov or prov[key] in forbidden:
             raise RuntimeError(
                 f"D-19 provenance 硬校验失败：{key} 缺失或为占位值（{prov.get(key)!r}）"

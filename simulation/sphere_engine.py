@@ -126,6 +126,12 @@ class SphereEngine:
         "_oracle_transfers", "_oracle_count",
         "_resp_decisions", "_resp_exposed", "_resp_delta_sum", "_resp_flip",
         "_measure_resp", "_oracle_on",
+        # ---- D-26a：oracle 四环节诊断漏斗（纯观测计数，D-24 G-A 不过后定位瓶颈）----
+        # 内评 _eval/D24判读预析 §4.1：分开记 ①发射 ②归因成功 ③true_sig ④实际转移，
+        # 否则只有聚合 return_ratio、不知道卡在哪一环。仅在 oracle 开启时累加。
+        "_diag_had_sig", "_diag_true_sig", "_diag_sel",
+        "_diag_attrib_found", "_diag_in_window", "_diag_not_self",
+        "_diag_budget_ok", "_diag_applied",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -307,6 +313,15 @@ class SphereEngine:
         self._resp_flip = 0
         self._measure_resp = bool(config.info_structure.measure_signal_response)
         self._oracle_on = bool(config.oracle.enabled)
+        # D-26a 四环节诊断累计器（纯观测；oracle off 时恒零且不累加）
+        self._diag_had_sig = 0        # 移动者落点"有信号"的次数
+        self._diag_true_sig = 0       # 其中落点同时"有食物"（oracle 选中的语义）
+        self._diag_sel = 0            # 进入 oracle 选择集的接收者次数
+        self._diag_attrib_found = 0   # 归因命中：落点登记过发送者 且 发送者仍存活
+        self._diag_in_window = 0      # 归因命中 且 在 persistence 窗口内
+        self._diag_not_self = 0       # 且 发送者 ≠ 接收者（不自反馈）
+        self._diag_budget_ok = 0      # 且 C-9 保本额度 > 0
+        self._diag_applied = 0        # 实际成交（转移发生）次数
         if self._oracle_on and self._use_sim_core:
             # C-8：静默忽略会重演 R14"配置看似生效实则没生效" ⇒ 显式报错
             raise RuntimeError(
@@ -916,6 +931,9 @@ class SphereEngine:
                 # 位置=规格 §2.4（true_sig 之后、信任学习之前）；C-8 ⇒ 仅 Python 路径。
                 # 零 RNG、守恒；复用 :829 已算好的 true_sig（不新增判定逻辑）。
                 if self._oracle_on:
+                    # D-26a：①②③ 上游环节计数（纯观测，不改状态/随机流）
+                    self._diag_had_sig += int(had_signal.sum())
+                    self._diag_true_sig += int(true_sig.sum())
                     self._oracle_after_move(mi, target_cells, had_signal, true_sig, energy)
                 self._trust[mi[true_sig]] = np.minimum(
                     1.0, self._trust[mi[true_sig]] + ccfg.trust_true
@@ -1383,6 +1401,13 @@ class SphereEngine:
             -1.0,
         )
         ok = found & win & (s_ids != r_id) & (budget > 0)
+        # D-26a 四环节漏斗计数（逐级累加，纯观测）：进入选择集 → 归因命中 →
+        # 窗口内 → 非自反馈 → 保本额度可用 → 实际成交。用于定位 D-24 G-A 瓶颈。
+        self._diag_sel += int(sel.sum())
+        self._diag_attrib_found += int(found.sum())
+        self._diag_in_window += int((found & win).sum())
+        self._diag_not_self += int((found & win & (s_ids != r_id)).sum())
+        self._diag_budget_ok += int((found & win & (s_ids != r_id) & (budget > 0)).sum())
         if not ok.any():
             return
         total, cnt, s_kept, g_kept = apply_oracle(
@@ -1393,6 +1418,7 @@ class SphereEngine:
             donation=ocfg.donation,
         )
         if cnt:
+            self._diag_applied += int(cnt)
             self._oracle_gain[self._id[s_kept]] += g_kept
             self._oracle_transfers += total
             self._oracle_count += cnt
@@ -1429,6 +1455,44 @@ class SphereEngine:
             "count": int(self._oracle_count),
             "emissions": emissions,
             "oracle_return_ratio": round(float(ratio), 6),
+            "funnel": self.oracle_funnel(),   # D-26a 四环节诊断
+        }
+
+    def oracle_funnel(self) -> dict:
+        """D-26a oracle 四环节诊断漏斗（累计口径；内评 `_eval/D24判读预析` §4.1）。
+
+        「发射→成功通信」的逐级衰减，用于定位 D-24 G-A 不过时卡在哪一环：
+
+            ① emissions 发射事件数
+              ⇒ had_signal  接收者落点**有信号**（人-次）
+              ⇒ true_sig    其中落点**同时有食物**（= oracle 选中语义，require_food=True）
+            ② attrib_found  落点登记过发送者 且 发送者**仍存活**（id→slot 解析成功）
+              ⇒ in_window   且 在 persistence 归因窗口内
+              ⇒ not_self    且 非自反馈（发送者 ≠ 接收者）
+              ⇒ budget_ok   且 C-9 保本额度 > 0
+            ④ applied       实际成交（能量转移发生）
+
+        后级恒 ⊆ 前级（逐级互斥计数）。⚠️ `emissions` 是**发送者-次**，
+        `had_signal`/`true_sig` 是**移动者-次**（量纲不同），跨量纲比值仅作量级参考。
+        """
+        ap = self._diag_applied
+        return {
+            "emissions": int(self._emit_count.sum()),
+            "had_signal": self._diag_had_sig,
+            "true_sig": self._diag_true_sig,
+            "selected": self._diag_sel,
+            "attrib_found": self._diag_attrib_found,
+            "in_window": self._diag_in_window,
+            "not_self": self._diag_not_self,
+            "budget_ok": self._diag_budget_ok,
+            "applied": ap,
+            "sel_to_applied": round(ap / self._diag_sel, 6) if self._diag_sel else 0.0,
+            "had_sig_to_applied": (
+                round(ap / self._diag_had_sig, 6) if self._diag_had_sig else 0.0
+            ),
+            "emissions_per_applied": (
+                round(int(self._emit_count.sum()) / ap, 3) if ap else None
+            ),
         }
 
     # ---- L10a 果实-种子传播（数值管线先行版） -----------------------------
@@ -1713,6 +1777,15 @@ class SphereEngine:
             data["rs_cohort"] = self._rs_cohort.copy()
             data["emit_count"] = self._emit_count.copy()
             data["oracle_gain"] = self._oracle_gain.copy()
+        # D-26a 四环节诊断计数（oracle off 时恒零，仍随快照走以保证续跑后累计不失真）
+        data["diag_funnel"] = np.array(
+            [
+                self._diag_had_sig, self._diag_true_sig, self._diag_sel,
+                self._diag_attrib_found, self._diag_in_window, self._diag_not_self,
+                self._diag_budget_ok, self._diag_applied,
+            ],
+            dtype=np.int64,
+        )
 
         # --- 6. RNG 状态（可复现的关键）---
         data["rng_state"] = np.array(
@@ -1853,6 +1926,11 @@ class SphereEngine:
         engine._resp_exposed = int(data["resp_exposed"]) if "resp_exposed" in data else 0
         engine._resp_delta_sum = float(data["resp_delta_sum"]) if "resp_delta_sum" in data else 0.0
         engine._resp_flip = int(data["resp_flip"]) if "resp_flip" in data else 0
+        if "diag_funnel" in data:   # D-26a：旧快照回退全零
+            _df = data["diag_funnel"]
+            (engine._diag_had_sig, engine._diag_true_sig, engine._diag_sel,
+             engine._diag_attrib_found, engine._diag_in_window, engine._diag_not_self,
+             engine._diag_budget_ok, engine._diag_applied) = (int(x) for x in _df)
         if "rs_children" in data:
             engine._rs_children = data["rs_children"].copy()
             engine._rs_observed = data["rs_observed"].copy()

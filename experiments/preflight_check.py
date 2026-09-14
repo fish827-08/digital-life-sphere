@@ -58,7 +58,7 @@ EXPECTED_SWITCHES = {
     "oracle":  {"arbitrary_codebook": True,  "neutral_genes": False, "signal_disabled": False, "oracle_enabled": True},
 }
 
-COMPARE_FIELDS = ("N", "g14", "g15", "trust", "max_gen")
+COMPARE_FIELDS = ("N", "g14", "g15", "trust", "max_gen", "max_gen_cur")
 
 
 # ---------------------------------------------------------------- 纯函数（可单测）
