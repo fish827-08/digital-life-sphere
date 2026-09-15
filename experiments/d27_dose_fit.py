@@ -49,6 +49,8 @@ def load(dirp: Path) -> list[dict]:
             "conversion": (ap / em) if (ap and em) else None,
             "N": res.get("final_N"),
             "eco_gate": res.get("eco_gate_pass"),
+            "extinct": res.get("extinct"),
+            "pred_frac": res.get("final_pred_frac"),
             "final_tick": res.get("final_tick"),
             "g15_final": res.get("final_g15"),
         })
@@ -104,14 +106,14 @@ def main() -> int:
     print("=" * 96)
     print(f"D-27④-B 剂量-响应（目标 ratio ≥ {args.target}；SIGNAL_COST={SIGNAL_COST}）")
     print("=" * 96)
-    hdr = f"{'run':14s}{'d':>7}{'ratio':>9}{'cap':>7}{'ratio/cap':>10}{'转化率':>9}{'N':>7}{'gate':>6}"
+    hdr = f"{'run':14s}{'d':>7}{'ratio':>9}{'cap':>7}{'ratio/cap':>10}{'转化率':>9}{'N':>7}{'灭绝':>6}"
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         cap = cap_of(r["donation"])
         print(f"{r['run']:14s}{r['donation']:>7.3f}{r['ratio']:>9.4f}{cap:>7.3f}"
               f"{(r['ratio'] / cap if cap else 0):>10.4f}"
-              f"{(r['conversion'] or 0):>9.4f}{str(r['N']):>7}{str(r['eco_gate']):>6}")
+              f"{(r['conversion'] or 0):>9.4f}{str(r['N']):>7}{str(r['extinct']):>6}")
 
     # ---- 按剂量聚合（seed 均值）----
     ds = sorted({r["donation"] for r in rows})
@@ -154,9 +156,19 @@ def main() -> int:
         print(f"     ⇒ 按 R88 补充：**暂停 C、上板请裁**；构造级变更（协调红利型／增益档）"
               f"不自行实施")
     # 生态门代价（O-5 预检）
-    bad = [r["run"] for r in rows if not r["eco_gate"]]
-    print(f"\n  生态门（O-5）：{len(rows) - len(bad)}/{len(rows)} 通过"
-          + (f"；未过：{bad}" if bad else ""))
+    # ⚠️ `eco_gate_pass` 的判据含 `last >= 10000` 硬编码（为 60k 批定义）⇒ **对短程批恒 False**，
+    #    直接引用会把"短程"误读成"生态崩溃"。故此处**不引用该门**，改用更朴素、
+    #    对短程成立的判据：灭绝数 + 终局 N 分布（并保持分层）。
+    n_ext = sum(1 for r in rows if r.get("extinct"))
+    ns = sorted(r["N"] for r in rows if r["N"] is not None)
+    dom = [r["N"] for r in rows if (r.get("pred_frac") or 0) >= 0.9]
+    non = [r["N"] for r in rows if (r.get("pred_frac") or 0) < 0.9]
+    print(f"\n  生态（O-5 替代判据，短程适用）：灭绝 **{n_ext}/{len(rows)}**；"
+          f"终局 N 中位 **{int(np.median(ns))}**（min {ns[0]}, max {ns[-1]}）")
+    print(f"    分层：捕食主导层 N 中位 {int(np.median(dom)) if dom else '—'}"
+          f"（n={len(dom)}）／ 非捕食层 N 中位 {int(np.median(non)) if non else '—'}（n={len(non)}）")
+    print("    ⚠️ 本批 `eco_gate_pass` 全 False 是**短程伪象**（判据含 `last>=10000`），"
+          "**非生态失败**——勿引该列下结论。")
     return 0
 
 
