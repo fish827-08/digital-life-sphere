@@ -113,16 +113,59 @@ def power_sign_test(n: int, mu: float, sd: float, alpha: float = 0.05) -> float:
 
 def power_ci_zero(n: int, mu: float, sd: float, alpha: float = 0.05,
                   n_mc: int = 200_000) -> float:
-    """判据 R2：**合并统计量的种子级 bootstrap CI 不覆盖 0**（单尾 α=0.05）。
-
-    统计量 = 各 seed 统计量的**中位/均值**（此处用均值，与 CI 口径一致）；蒙特卡洛。
-    """
+    """判据 R2（**σ 已知**版）：合并统计量的种子级 CI 下界 > 0（单尾 α）。"""
     if not np.isfinite(sd) or sd <= 0:
         return float("nan")
     z = 1.6448536269514722  # 单尾 95%
     se = sd / np.sqrt(n)
     samples = RNG.normal(mu, se, n_mc)
     return float(np.mean(samples - z * se > 0))
+
+
+def _t_crit(df: int, alpha: float = 0.05, n_mc: int = 400_000) -> float:
+    """单尾 t 临界值的**蒙特卡洛**估计（不依赖 scipy；df 下的 t_{1−α}）。"""
+    z = RNG.normal(0.0, 1.0, size=(n_mc, df + 1))
+    m = z.mean(axis=1)
+    s = z.std(axis=1, ddof=1)
+    stat = m / (s / np.sqrt(df + 1))
+    return float(np.quantile(stat, 1 - alpha))
+
+
+def power_ci_t(n: int, mu: float, sd: float, alpha: float = 0.05,
+               n_mc: int = 200_000) -> float:
+    """判据 R2 的**小样本版**（`[内评]` 00:28 §未核实② 要求）：σ **未知** ⇒ 单尾 **t** 临界值。
+
+    n=4 时 `t_{3,.95} = 2.353` ≫ z = 1.645 ⇒ 比 z 版保守 ⇒ **n=4 可能不够**。
+    """
+    df = n - 1
+    if df < 1:
+        return float("nan")
+    t_crit = _t_crit(df, alpha)
+    xs = RNG.normal(mu, sd, size=(n_mc, n))
+    m = xs.mean(axis=1)
+    s = xs.std(axis=1, ddof=1)
+    return float(np.mean(m - t_crit * s / np.sqrt(n) > 0))
+
+
+def power_rule1_bound(n: int, mu: float, sd: float, floor: float) -> float:
+    """判据 R1 的**上界（保守）**：P(A ∧ B) ≤ min(P(A), P(B))。
+
+    ⚠️ 这不是精确功效（两合取项相关）。仅当 μ = floor 时，`P(B) ≡ 0.5` ⇒ 上界 ≤ 0.5
+    ⇒ "R1 不可达 0.8" **由该上界即可判定**（a fortiori）。
+    """
+    return min(power_all_positive(n, mu, sd), power_floor(n, mu, sd, floor))
+
+
+def power_rule1_joint(n: int, mu: float, sd: float, floor: float,
+                      n_mc: int = 200_000) -> float:
+    """判据 R1 的**精确联合**功效（蒙特卡洛）：n 个 seed **全为正** ∧ **合并(均值) ≥ floor**。
+
+    `[内评]` 00:28 §二 问"R1 列是双重条件联合功效还是别的 p+" ⇒ 本条即**双重条件的联合功效**；
+    表中 0.500 是**上界**（`power_rule1_bound`）在 μ=floor 下的必然值（第二合取项恒 0.5）。
+    """
+    xs = RNG.normal(mu, sd, size=(n_mc, n))
+    ok = (xs > 0).all(axis=1) & (xs.mean(axis=1) >= floor)
+    return float(ok.mean())
 
 
 def power_floor(n: int, mu: float, sd: float, floor: float = 0.10) -> float:
@@ -202,12 +245,13 @@ def main() -> int:
     sd = arm_rho["sd_rho"]
     print(f"\n④ 候选判据功效曲线（σ = {sd:.4f}，最大方差臂 {arm_rho['arm']}；设计备择 μ = {args.alt}）")
     cands = [
-        ("R1 全一致为正 ∧ 合并ρ≥floor", lambda n: min(power_all_positive(n, args.alt, sd),
-                                                 power_floor(n, args.alt, sd, args.alt))),
-        ("R2 合并ρ 种子级CI下界>0", lambda n: power_ci_zero(n, args.alt, sd)),
-        ("R3 符号检验(单尾 .05)", lambda n: power_sign_test(n, args.alt, sd)),
+        ("R1 联合(上界)", lambda n: power_rule1_bound(n, args.alt, sd, args.alt)),
+        ("R1 联合(精确)", lambda n: power_rule1_joint(n, args.alt, sd, args.alt)),
+        ("R2 CI>0 (z)", lambda n: power_ci_zero(n, args.alt, sd)),
+        ("R2 CI>0 (t)", lambda n: power_ci_t(n, args.alt, sd)),
+        ("R3 符号检验", lambda n: power_sign_test(n, args.alt, sd)),
     ]
-    hdr2 = f"{'n(seed)':>8}" + "".join(f"{c[0]:>26}" for c in cands)
+    hdr2 = f"{'n(seed)':>8}" + "".join(f"{c[0]:>17}" for c in cands)
     print(hdr2)
     print("-" * len(hdr2))
     req: dict[str, int | None] = {}
@@ -215,7 +259,7 @@ def main() -> int:
         cells = []
         for name, fn in cands:
             pw = fn(n)
-            cells.append(f"{pw:>26.3f}" if np.isfinite(pw) else f"{'—':>26}")
+            cells.append(f"{pw:>17.3f}" if np.isfinite(pw) else f"{'—':>17}")
             if np.isfinite(pw) and pw >= args.power and req.get(name) is None:
                 req[name] = n
         print(f"{n:>8}" + "".join(cells))
@@ -224,6 +268,8 @@ def main() -> int:
     for name, _ in cands:
         r = req.get(name)
         print(f"  {name:32s} ⇒ **n = {r if r else f'>{args.nmax}（不可达）'}**")
+    print("  ⚠️ R2「σ 未知 ⇒ 用 t 临界值」是**保守口径**（`[内评]` 00:28 §未核实② 要求）"
+          "⇒ 建议**以 t 版为准**定 seed 数。")
 
     print("\n🔴 判据形态警示（R44 的核心产出）")
     p_pos = 0.5 * (1 + erf((args.alt / sd) / np.sqrt(2)))
