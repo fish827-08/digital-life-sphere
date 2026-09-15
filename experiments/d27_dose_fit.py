@@ -121,8 +121,9 @@ def receiver_side_section(rows: list[dict]) -> None:
 
     # ---- 观察项 3：对账 + 偿付约束（纯机械，最硬）----
     print("\n【观察项 3】对账（Σtransfers ≡ Σpayer ≡ Σ收款，应恒等）+ 偿付约束量化：")
-    hdr = (f"{'donation':>9}{'笔数':>9}{'Σpayer':>10}{'恒等':>6}"
-           f"{'偿付截断n':>10}{'截断额':>9}{'付款方破产n':>11}{'额度用尽n':>10}{'截断率':>8}")
+    hdr = (f"{'donation':>9}{'笔数':>12}{'Σpayer':>14}{'恒等':>7}"
+           f"{'偿付截断n':>10}{'截断额':>10}{'付款方破产n':>12}{'额度用尽n':>12}"
+           f"{'额度截断n':>12}{'截断率':>9}")
     print(hdr)
     print("-" * len(hdr))
     for d in ds:
@@ -133,15 +134,17 @@ def receiver_side_section(rows: list[dict]) -> None:
         amt = sum(float(r["ledger"].get("payer_trunc_amt", 0.0)) for r in sel)
         broke = sum(int(r["ledger"].get("payer_broke_n", 0)) for r in sel)
         exh = sum(int(r["ledger"].get("budget_exhausted_n", 0)) for r in sel)
+        btr = sum(int(r["ledger"].get("budget_trunc_n", 0)) for r in sel)
         ev = sum(int(r["rs"].get("events", 0)) for r in sel)
         paid = sum(float(r["ledger"].get("payer_paid", 0.0)) for r in sel)
         recv = sum(float(r["ledger"].get("sender_received", 0.0)) for r in sel)
         ok = all(bool(r["ledger"].get("identity_ok")) for r in sel)
         rate = (cnt / ev) if ev else 0.0
-        print(f"{d:>9.3f}{ev:>9d}{paid:>10.3f}{str(ok):>6}"
-              f"{cnt:>10d}{amt:>9.3f}{broke:>11d}{exh:>10d}{rate:>8.3f}")
+        print(f"{d:>9.3f}{ev:>12,}{paid:>14.1f}{str(ok):>7}"
+              f"{cnt:>10,}{amt:>10.3f}{broke:>12,}{exh:>12,}{btr:>12,}{rate:>9.5f}")
     print("  ⚠️ 定位说明（内评 §四 命名建议已采纳）：三账恒等**由构造保证** ⇒ 它是**对账字段**，"
-          "不是守恒检验；\n     真正有信息量的是右四列（偿付约束）：`偿付截断n` > 0 ⇒ 接收者**付不起满额**。")
+          "不是守恒检验；\n     真正有信息量的是右侧约束列：`偿付截断n`（接收者付不起满额）"
+          "与 `额度截断n`/`额度用尽n`（收款方 C-9 额度用尽）**谁主导**。")
 
     # ---- 观察项 1：接收侧净能量效应 ----
     print("\n【观察项 1】接收侧净能量效应（吃到 − 回付 vs 不通信者基线）：")
