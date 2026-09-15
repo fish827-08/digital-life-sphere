@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from simulation.config import InfoStructureConfig, SimConfig
+from simulation.config import SIGNAL_COST, InfoStructureConfig, SimConfig
 from simulation.sphere_engine import SphereEngine
 
 
@@ -18,6 +18,8 @@ def _engine(oracle: bool = True, seed: int = 42, max_count: int = 3240) -> Spher
     cfg.simulation.use_sim_core = False
     cfg.population.max_count = max_count
     cfg.oracle.enabled = oracle
+    if oracle:
+        cfg.oracle.donation = SIGNAL_COST   # C5：启用时必须自洽（>= SIGNAL_COST）
     d2 = InfoStructureConfig(enabled=True, learning_rate=0.05)
     cfg.info_structure = d2
     return SphereEngine(cfg)

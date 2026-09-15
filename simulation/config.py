@@ -233,6 +233,15 @@ class CultureConfig:
         assert self.trust_false >= 0
 
 
+# ---------------------------------------------------------------- 信号发射成本（**单一真源**）
+# 🔴 C5（2026-09-15 立）：此值此前在 `simulation/sphere_engine.py` 的 **两个分支里各硬编码一次**
+#    （Rust 路径与 Python 路径），而 `experiments/preflight_check.py` 又抄了一份 ⇒ **同源值三处声明**，
+#    是"改一处漏一处"的典型温床（本项目已付过 6 次同型学费）。
+#    ⇒ 现统一为**模块级唯一常量**；引擎与 preflight 都必须引用它，不得再写字面量。
+#    改动它 ⇒ 必须同时复核 `OracleConfig` 的保本断言与所有历史批的可比性。
+SIGNAL_COST: float = 0.1
+
+
 @dataclass
 class InfoStructureConfig:
     """D2 信息结构重构参数（语言涌现最小充分条件）。
@@ -310,10 +319,27 @@ class OracleConfig:
     donation: float = 0.05             # 单次成功通信的能量转移量
     persistence: int = 10              # 归因窗口（tick）；0 = 仅本 tick
     require_food: bool = True          # True=利益对齐（落点须有食物）；False=仅"有人听"
+    # C5 逃生阀：显式声明"本批有意研究补偿不足区制"（**仅供 Pre-Flight 放行**）。
+    # ⚠️ 语义（2026-09-15）：它**不压制下面的硬断言**——因为 `from_dict` 必须能**忠实回放**旧快照，
+    #    若断言可被字段压制，就只能靠"在 from_dict 里偷偷改写值"来兼容 ⇒ 破坏"载入=原样"契约。
+    #    ⇒ 分工：**硬断言**保证"跑不起来不自洽的配置"；**pre-flight** 读回该字段决定是否**放行**。
+    allow_non_breakeven: bool = False
 
     def __post_init__(self) -> None:
         assert self.donation >= 0, "donation 非负"
         assert self.persistence >= 0, "persistence 非负"
+        # ---- C5 规格自洽（2026-09-15 立；事故原型 = D-24 的 G-A 不过） ----
+        # V-1 曾把 donation 定为 0.05 而 SIGNAL_COST 是 0.1 ⇒ 结构性上限 = 0.05/0.1 = 0.5 < 1.0
+        # ⇒ "保本"语义**在数学上不可达**，oracle 必然检出不了阳性（G-A 必不过）。
+        # C4 只问"开关有没有生效"，本断言问的是"生效的值彼此自不自洽" ⇒ 这是 C5 的第一条落地。
+        if self.enabled:
+            assert self.donation >= SIGNAL_COST, (
+                f"C5 规格自洽失败：oracle 已启用，但 donation({self.donation}) < "
+                f"SIGNAL_COST({SIGNAL_COST}) ⇒ return_ratio 结构性上限 = "
+                f"{self.donation / SIGNAL_COST:.4f} < 1.0 ⇒ \"保本\"语义不可达"
+                f"（D-24 G-A 不过的根因）。请反解 donation ≥ SIGNAL_COST/转化率；"
+                f"若确要研究补偿不足区制，请显式设 allow_non_breakeven=True。"
+            )
 
 
 # 旧存档回退（oracle）：未知键忽略、缺失键用默认值。

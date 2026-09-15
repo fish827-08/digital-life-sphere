@@ -1,6 +1,6 @@
-"""Pre-Flight 检查工具（R61-C3/C4 + R78-3）的纯函数单测。
+"""Pre-Flight 检查工具（R61-C3/C4 + R78-3 + C5）的纯函数单测。
 
-纪律（R47 精神）：**仪器自己也要被验证**——本工具的作用是在实验前拦截静默配置事故，
+纪律（R47 精神）：**仪器自己也要被验证**——本工具的作用是在实验前拦截静默配置事故；
 若它自己的比较/断言逻辑有错，就会变成"又一件坏仪器"。
 """
 import importlib.util
@@ -25,7 +25,7 @@ def _rows(pairs):
 
 
 def test_compare_trajectories_identical_detected():
-    """F-R9 症状：逐字段完全一致 ⇒ 必须被判定为"完全一致"（=失败信号）。"""
+    """F-R9 症状：逐字段完全一致 ⇒ 必须被判为"完全一致"（失败信号）。"""
     a = _rows([(1000, {"N": 300, "g14": 0.5, "g15": 0.4, "trust": 0.5, "max_gen": 3}),
                (2000, {"N": 500, "g14": 0.5, "g15": 0.4, "trust": 0.5, "max_gen": 5})])
     b = [dict(r) for r in a]
@@ -83,3 +83,117 @@ def test_expected_switches_covers_runner_arm_choices():
     assert set(choices) == set(pf.EXPECTED_SWITCHES), (
         f"runner 臂集 {sorted(choices)} 与 preflight 表 {sorted(pf.EXPECTED_SWITCHES)} 不一致"
     )
+
+
+# ---------------------------------------------------------------- C5 规格自洽检查
+# 事故原型（D-24 / G-A 不过）：V-1 把 donation 定为 0.05 而 SIGNAL_COST 是 0.1
+# ⇒ return_ratio 结构性上限 = 0.5 < 1.0 ⇒ "保本"语义在数学上不可达。
+# C4 全过（每个开关都确实生效了），但规格自相矛盾 —— 这正是 C5 要拦的。
+
+def test_c5_catches_donation_below_signal_cost():
+    """D-24 的根因：oracle 启用 + donation(0.05) < SIGNAL_COST(0.1) ⇒ 必须报"保本不可达"。"""
+    sw = {"oracle_enabled": True, "donation": 0.05}
+    probs = pf.spec_consistency_problems(sw)
+    assert len(probs) == 1, probs
+    assert "保本" in probs[0], probs
+
+
+def test_c5_catches_at_exactly_half_and_just_below():
+    """0.5×SIGNAL_COST 与"刚好差一点"的档位都要被拦（不许浮点擦边通过）。"""
+    for d in (0.05, 0.0999999, 0.0):
+        probs = pf.spec_consistency_problems({"oracle_enabled": True, "donation": d})
+        assert probs, f"donation={d} 应被拦下"
+
+
+def test_c5_passes_at_break_even_and_above():
+    """保本线（donation == SIGNAL_COST）与反解档（≈0.674）都应通过。"""
+    for d in (pf.SIGNAL_COST, 0.674, 0.7, 2.0):
+        assert pf.spec_consistency_problems({"oracle_enabled": True, "donation": d}) == [], d
+
+
+def test_c5_ignores_donation_when_oracle_disabled():
+    """oracle 关闭时 donation 不生效 ⇒ 不得据此拦批（C-6：关闭时行为逐位一致）。"""
+    assert pf.spec_consistency_problems(
+        {"oracle_enabled": False, "donation": 0.05}) == []
+
+
+def test_c5_flags_negative_donation():
+    probs = pf.spec_consistency_problems({"oracle_enabled": True, "donation": -0.1})
+    assert any("负" in p for p in probs), probs
+
+
+def test_c5_no_donation_key_means_not_applicable():
+    """非 oracle 批的 switches 里没有 donation ⇒ 无从检查，应静默通过（不得误报）。"""
+    assert pf.spec_consistency_problems(
+        {"arbitrary_codebook": True, "neutral_genes": False}) == []
+
+
+def test_c5_tolerates_non_numeric_donation():
+    """脏数据不得让工具崩 ⇒ 应降级为一条问题。"""
+    probs = pf.spec_consistency_problems({"oracle_enabled": True, "donation": "abc"})
+    assert probs and "不是数值" in probs[0]
+
+
+def test_signal_cost_ceiling_algebra():
+    """结构性上限 = donation/SIGNAL_COST（与生态无关的纯代数上界）。"""
+    assert pf.signal_cost_ceiling(0.05) == pytest.approx(0.5)
+    assert pf.signal_cost_ceiling(0.1) == pytest.approx(1.0)
+    assert pf.signal_cost_ceiling(0.674) > 1.0
+    # 除零保护
+    assert pf.signal_cost_ceiling(0.05, signal_cost=0.0) == float("inf")
+
+
+def test_breakeven_neutral_boundary_is_ratio_one():
+    """🔴 保本中性边界（联网线 2026-09-15 预警；Lewis 原型对照）：
+
+    `ratio = donation/SIGNAL_COST == 1.0` ⇒ sender 期望净收益 = 0 ⇒ **选择差 = 0** ⇒ 漂变主导
+    ⇒ 跨 seed CI **结构性易含 0** ⇒ 该臂**不能**当阳性对照（阳性要求 ratio 严格 > 1）。
+
+    本测试把这个"边界值"钉死：`donation == SIGNAL_COST` 恰好落在 ratio=1。
+    """
+    assert pf.signal_cost_ceiling(pf.SIGNAL_COST) == pytest.approx(1.0)
+    # 保本档可通过硬断言（它是合法配置），但低于建议的阳性裕度 ⇒ 应由 advisory 提示
+    assert pf.spec_consistency_problems(
+        {"oracle_enabled": True, "donation": pf.SIGNAL_COST}) == []
+    assert pf.POSITIVE_CONTROL_MIN_RATIO > 1.0
+
+
+def test_c5_waiver_allows_declared_sub_breakeven():
+    """显式逃生阀：声明要研究"补偿不足区制"时放行（须留痕，不得静默）。
+
+    语义（与 config.py 的分工）：断言仍然硬失败（`from_dict` 须能忠实回放旧快照），
+    **放行只体现在 Pre-Flight 读回**——即本函数看到 switches 里带了该字段就放过。
+    """
+    assert pf.spec_consistency_problems(
+        {"oracle_enabled": True, "donation": 0.05, "allow_non_breakeven": True}) == []
+
+
+def test_c5_signal_cost_matches_engine():
+    """🔴 C5 的核心前提：preflight 的 SIGNAL_COST 必须与引擎真源一致。
+
+    若引擎改了 SIGNAL_COST 而这里没同步，C5 会用**错误的保本线**做断言
+    ⇒ 静默失效（正是本工具要防的错型）。故必须硬核对。
+    """
+    # 🔴 C5 的真源已收拢为 `simulation/config.py:SIGNAL_COST`（2026-09-15）：
+    #    此前同源值散在 4 处（引擎两分支局部字面量 / oracle.EMISSION_COST / preflight 本地抄写）
+    #    —— 那本身就是"改一处漏一处"的温床。现在只允许一个真源。
+    cfg_src = (ROOT / "simulation" / "config.py").read_text(encoding="utf-8")
+    m = re.search(r"^SIGNAL_COST\s*:\s*float\s*=\s*([0-9.]+)", cfg_src, re.M)
+    assert m, "未能从 config.py 解析 SIGNAL_COST（若实现改了，请同步本测试）"
+    assert float(m.group(1)) == pytest.approx(pf.SIGNAL_COST), (
+        f"config.SIGNAL_COST={m.group(1)} 与 preflight {pf.SIGNAL_COST} 不一致"
+    )
+    # 引擎与 oracle 侧不得再有字面量副本（防退化回"多处声明"）
+    for f in ("simulation/sphere_engine.py", "simulation/oracle.py"):
+        src = (ROOT / f).read_text(encoding="utf-8")
+        assert not re.search(r"^\s*SIGNAL_COST\s*=\s*0\.1", src, re.M), f"{f} 出现字面量副本"
+        assert not re.search(r"^EMISSION_COST\s*=\s*0\.1", src, re.M), f"{f} 出现 EMISSION_COST 字面量"
+
+
+def test_preflight_report_mentions_c5():
+    """CLI 的检查流程里必须真的接线了 C5（防"函数写了但没被调用"）。"""
+    src = (ROOT / "experiments" / "preflight_check.py").read_text(encoding="utf-8")
+    assert "spec_consistency_problems(" in src.split("def main(")[1], (
+        "main() 未调用 spec_consistency_problems ⇒ C5 未接线"
+    )
+    assert "C5 规格自洽" in src

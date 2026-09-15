@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from simulation.config import InfoStructureConfig, SimConfig  # noqa: E402
+from simulation.config import SIGNAL_COST, InfoStructureConfig, SimConfig  # noqa: E402
 from simulation.oracle import EMISSION_COST, apply_oracle, attribution_ok  # noqa: E402
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
@@ -90,6 +90,10 @@ def _engine(oracle: bool, seed: int = 42) -> SphereEngine:
     d2 = InfoStructureConfig(enabled=True, learning_rate=0.05)
     cfg.info_structure = d2
     cfg.oracle.enabled = oracle
+    if oracle:
+        # C5（2026-09-15）：启用 oracle 时 donation 必须 >= SIGNAL_COST，否则规格自相矛盾
+        # （D-24 的 G-A 不过是这个原因）。测试助手也要给自洽档。
+        cfg.oracle.donation = SIGNAL_COST
     return SphereEngine(cfg)
 
 
@@ -217,7 +221,7 @@ def test_oracle_config_dict_fallback():
     d.pop("oracle", None)
     c2 = SimConfig.from_dict(d)
     assert c2.oracle.enabled is False
-    assert c2.oracle.donation == 0.05
+    assert c2.oracle.donation == 0.05          # 默认档（关闭态 ⇒ C5 不触发）
     # fingerprint 含 oracle（批次自证是否开了 oracle —— 规格 §七.4）
     assert "oracle" in SimConfig(seed=1).fingerprint()
     assert EMISSION_COST == 0.1

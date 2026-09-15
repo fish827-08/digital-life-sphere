@@ -40,7 +40,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from core.lifecycle import DeathCause
-from simulation.config import SimConfig
+from simulation.config import SIGNAL_COST, SimConfig
 from simulation.genes import Gene
 from simulation.oracle import EMISSION_COST, apply_oracle, attribution_ok
 from simulation.provenance import CountingRNG
@@ -683,7 +683,6 @@ class SphereEngine:
         if self._use_sim_core and random_patterns is None and not (
             self.config.info_structure.enabled and self.config.info_structure.arbitrary_codebook
         ):
-            SIGNAL_COST = 0.1
             dens = occ.astype(np.float64)
             self._sim_core.signal_emit(
                 self._flat[:P], energy, signal_gene, rand_emit,
@@ -694,7 +693,6 @@ class SphereEngine:
         else:
             emitters = np.flatnonzero(rand_emit < signal_gene)
             if len(emitters):
-                SIGNAL_COST = 0.1  # 发射成本（降低，让信号基因不被纯成本淘汰）
                 can_afford = energy[emitters] >= SIGNAL_COST
                 emitters = emitters[can_afford]
                 if len(emitters):

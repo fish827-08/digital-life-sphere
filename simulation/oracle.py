@@ -33,9 +33,11 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from simulation.config import SIGNAL_COST  # 单一真源（C5）；EMISSION_COST 为兼容别名
+
 # 信号发射成本（与 sphere_engine.py 内 `SIGNAL_COST = 0.1` 同源；
 # 此处作为 oracle 保本封顶的记账基准。若改发射成本，两处必须同步。）
-EMISSION_COST = 0.1
+EMISSION_COST = SIGNAL_COST   # 兼容旧名；单一真源见 config.SIGNAL_COST（C5）
 
 
 def attribution_ok(sig_age: NDArray, signal_duration: int, persistence: int) -> NDArray:
