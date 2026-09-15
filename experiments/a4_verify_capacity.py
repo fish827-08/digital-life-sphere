@@ -57,7 +57,8 @@ from observatory.statistics import selection_gradient  # D-17：⑤ 单一口径
 def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           max_count: int = 5000, neutral: bool = False,
           sig_disabled: bool = False, oracle: bool = False,
-          measure: bool = False) -> SphereEngine:
+          measure: bool = False, oracle_donation: float | None = None,
+          oracle_persistence: int | None = None) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -79,10 +80,25 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.neutral_genes = neutral                  # 漂变零模型（冻结 g14/g15）
     c.signal_disabled = sig_disabled           # 信号禁用臂
     c.oracle.enabled = oracle                  # D-8 oracle 正向对照臂
+    # D-27④-A：剂量扫描（None ⇒ 沿用配置默认，行为与旧版逐位一致）
+    if oracle_donation is not None:
+        c.oracle.donation = float(oracle_donation)
+    if oracle_persistence is not None:
+        c.oracle.persistence = int(oracle_persistence)
     return SphereEngine(c)
 
 
 def main() -> None:
+    # ⚠️ 2026-09-15（内评代修，对应已上板的同类缺陷）：本文件续跑路径 print("\u21bb ...")，
+    #    而 Windows 默认 GBK 控制台**无法编码 U+21BB (↻)** ⇒ UnicodeEncodeError ⇒ **rc=1 假失败**。
+    #    症状：`test_f_r10_f_r12` 的 3 例失败（含 F-R13 回归），且**只在续跑路径**触发
+    #    —— 而 D-27-④ 的剂量测量（4 剂量 × 3 seed，须多轮续批）**正要走这条路**。
+    #    与 `preflight_check.py` 的同类修复同源（同一错型：“仪器坏了却看不见”的孪生面）。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # 非 TTY / 旧解释器：降级不重配，不因诊断能力缺失而阻断运行
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=("on", "off"), required=True)
     ap.add_argument("--seed", type=int, required=True)
@@ -106,6 +122,13 @@ def main() -> None:
                     help="种群上限（R41：⑤ 不饱和前提=3240；R19 口径=5000）")
     ap.add_argument("--measure", action="store_true",
                     help="显式开 ⑤观测+⑥探针（--arm 已隐含）")
+    # D-27④-A（R86 修订）：oracle 剂量扫描参数。默认 None ⇒ 沿用配置默认值（不改行为）。
+    ap.add_argument("--oracle-donation", "--donation", dest="oracle_donation",
+                    type=float, default=None,
+                    help="覆盖 oracle.donation（剂量扫描用）；**仅 --arm oracle 生效**。"
+                         "`--donation` 是等性别名（供 batch_runner `--<key>` 拼参用）")
+    ap.add_argument("--oracle-persistence", type=int, default=None,
+                    help="覆盖 oracle.persistence（归因窗口 tick）；仅 --arm oracle 生效")
     args = ap.parse_args()
 
     arm = args.arm
@@ -116,6 +139,14 @@ def main() -> None:
     # 若无此行，batch grid 只传 arm 时 control 会与 main 同配置同轨迹（2026-09-13 D-24 实测复现）。
     if arm == "control":
         args.codebook = 0
+    # D-27④-A：剂量参数只在 oracle 臂有意义——**非 oracle 臂传了就直接报错**，
+    # 不静默忽略（教训 2：静默 no-op 最危险）。
+    if arm != "oracle" and (args.oracle_donation is not None
+                            or args.oracle_persistence is not None):
+        raise SystemExit(
+            "--oracle-donation/--oracle-persistence 仅在 --arm oracle 下生效"
+            f"（当前 arm={arm!r}）——请勿静默传参"
+        )
     measure = bool(args.measure) or arm is not None
 
     started = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -149,7 +180,9 @@ def main() -> None:
     else:
         e = build(args.mode, bool(args.codebook), args.seed, args.ticks,
                   max_count=args.max_count, neutral=neutral,
-                  sig_disabled=sig_disabled, oracle=oracle_on, measure=measure)
+                  sig_disabled=sig_disabled, oracle=oracle_on, measure=measure,
+                  oracle_donation=args.oracle_donation,
+                  oracle_persistence=args.oracle_persistence)
         start_tick = 0
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
