@@ -389,3 +389,105 @@ def test_r102_conservation_audit_three_accounts():
     assert a["sum_energy_delta"] == 0.0, f"C-2 被破坏：ΔΣenergy={a['sum_energy_delta']}"
     assert a["conserved"] is True
     assert e.oracle_stats()["audit"]["conserved"] is True   # 经 stats 也能读到
+
+
+# ---------------- R102 条件 1/3 + 内评《复核-R102方向修复》§三/§四 ----------------
+# 对账字段（payer 侧分解 + 偿付约束量化）与**接收侧效应**（方向翻转新引入的代价）。
+
+def test_oracle_ledger_identity_and_payer_truncation():
+    """对账恒等 + **付款方偿付截断**（内评 §四：payer_insolvent_truncated）。
+
+    donation=0.05、付款方仅 0.02 ⇒ 部分支付 0.02、截断 0.03。
+    """
+    e = np.array([0.0, 0.02])
+    led: dict = {}
+    total, cnt, _, _ = apply_oracle(
+        energy=e, receiver_slots=np.array([1], dtype=np.int64),
+        sender_slots=np.array([0], dtype=np.int64),
+        budget=np.array([1.0], dtype=np.float64), donation=0.05,
+        ledger=led,
+    )
+    assert cnt == 1 and total == pytest.approx(0.02)
+    assert led["payer_paid"] == pytest.approx(led["sender_received"]) == pytest.approx(0.02)
+    assert led["payer_trunc_n"] == 1
+    assert led["payer_trunc_amt"] == pytest.approx(0.03)
+    assert led["budget_trunc_n"] == 0
+
+
+def test_oracle_ledger_counts_payer_broke_and_budget_exhausted():
+    """两类整笔跳过必须**分开计数**（否则"接收者付不起"被混进"额度用尽"）。"""
+    e = np.array([0.0, 0.0, 5.0])
+    led: dict = {}
+    total, cnt, _, _ = apply_oracle(
+        energy=e, receiver_slots=np.array([1], dtype=np.int64),
+        sender_slots=np.array([0], dtype=np.int64),
+        budget=np.array([1.0], dtype=np.float64), donation=0.05, ledger=led,
+    )
+    assert cnt == 0 and total == 0.0
+    assert led["payer_broke_n"] == 1 and led["budget_exhausted_n"] == 0
+
+    led2: dict = {}
+    apply_oracle(
+        energy=e, receiver_slots=np.array([2], dtype=np.int64),
+        sender_slots=np.array([0], dtype=np.int64),
+        budget=np.array([0.0], dtype=np.float64), donation=0.05, ledger=led2,
+    )
+    assert led2["budget_exhausted_n"] == 1 and led2["payer_broke_n"] == 0
+
+
+def test_oracle_ledger_engine_accumulates_and_identity_holds():
+    """引擎侧累计：三账恒等 + `sum_transfers == payer_paid`（对账字段可用）。"""
+    cfg = SimConfig(seed=42)
+    cfg.simulation.use_sim_core = False
+    cfg.population.max_count = 400
+    cfg.info_structure = InfoStructureConfig(enabled=True, learning_rate=0.05)
+    cfg.oracle.enabled = True
+    cfg.oracle.donation = 2.0          # 高剂量 ⇒ 大量偿付截断（付款方 2.0 很贵）
+    e = SphereEngine(cfg)
+    for _ in range(300):
+        if e.extinct:
+            break
+        e.step()
+    led = e.oracle_ledger()
+    assert led["sum_transfers"] > 0, "该配置下应发生过转移"
+    assert led["identity_ok"] is True
+    assert led["payer_paid"] == pytest.approx(led["sender_received"])
+    assert led["payer_paid"] == pytest.approx(led["sum_transfers"], abs=1e-6)
+    assert led["role"].startswith("对账")
+
+
+def test_receiver_side_effects_actually_produces_data():
+    """🔴 教训 19：检查工具必须用**真实产物**验收——不能只断言"字段存在"。
+
+    要求：跑真实引擎后 ① 字段齐全 ② `food_events > 0`（**仪器真的测到了**落点摄入）
+    ③ 净额字段 == 摄入 − 付款（自洽）。
+    """
+    cfg = SimConfig(seed=7)
+    cfg.simulation.use_sim_core = False
+    cfg.population.max_count = 400
+    cfg.info_structure = InfoStructureConfig(enabled=True, learning_rate=0.05)
+    cfg.oracle.enabled = True
+    cfg.oracle.donation = 1.0
+    e = SphereEngine(cfg)
+    for _ in range(400):
+        if e.extinct:
+            break
+        e.step()
+    rs = e.oracle_stats()["receiver_side"]
+    for k in ("events", "food_events", "mean_intake_at_paid_cell",
+              "mean_intake_all_eaters", "mean_payment_per_event",
+              "net_eat_minus_pay", "net_vs_baseline", "caveat"):
+        assert k in rs, f"缺字段 {k}"
+    assert rs["events"] > 0, "应发生过转移"
+    assert rs["food_events"] > 0, "🔴 仪器没测到落点摄入 ⇒ 静默失效（教训 19 同型）"
+    assert rs["mean_intake_all_eaters"] > 0
+    assert rs["net_eat_minus_pay"] == pytest.approx(
+        rs["mean_intake_at_paid_cell"] - rs["mean_payment_per_event"], abs=1e-9
+    )
+    # 落点暂存：t 付款、t+1 进食时才消费 ⇒ **最后一步之后残留是正常**；
+    # 但必须**有界**（不会跨 tick 累积泄漏）——上限 = 该 tick 的成交笔数 ≤ 种群规模。
+    assert len(e._recv_pend_cells) <= max(1, len(e._id)), (
+        f"落点暂存泄漏：{len(e._recv_pend_cells)} > 种群 {len(e._id)}"
+    )
+    e.step()                      # 再走一步 ⇒ 上一批必须被消费掉（不叠加）
+    assert len(e._recv_pend_cells) <= max(1, len(e._id))

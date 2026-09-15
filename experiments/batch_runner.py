@@ -221,6 +221,16 @@ PRESETS = {
                "snapshot-every=0"],
         template="_rerun_logs/d27/dose{donation}_s{seed}.csv",
     ),
+    # D-27④-接收侧（内评《复核-R102方向修复》§三）：**同配置重跑**，唯一差别 = 引擎新增
+    # 接收侧/对账仪器 ⇒ ① 得接收侧三条观察项 ② 与 d27dose 的 final_N/ratio **逐位对拍**
+    #   ⇒ 证明「新仪器是纯观测」（不改变轨迹与随机流；F-R18 纪律的同族检查）。
+    "d27recv": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["donation=0.674,1.0,1.5,2.0", "seed=42,43,44"],
+        fixed=["mode=on", "arm=oracle", "ticks=8000", "max-count=3240",
+               "snapshot-every=0"],
+        template="_rerun_logs/d27_recv/dose{donation}_s{seed}.csv",
+    ),
 }
 
 

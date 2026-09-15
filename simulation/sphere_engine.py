@@ -137,6 +137,19 @@ class SphereEngine:
         # apply_oracle 是**双向转移** ⇒ 纯再分配、**C-2 守恒成立**、无注入。
         # 审计口径 = 包住 oracle 调用前后实测 Σenergy 的变化（应恒 0）。
         "_audit_calls", "_audit_sum_delta",
+        # ---- R102 条件 1/3 + 内评《复核-R102方向修复》§四：**oracle 对账字段** ----
+        # 定位 = 「对账（三账应恒等，由构造保证）+ 偿付约束量化」，**不是**守恒检验。
+        # 内评 §四 命名建议：call it a ledger, not an audit（本项目已吃过"看着像检查、
+        # 实际恒真"的亏：G-F 门 pass:True / test_o7 假绿）。
+        "_oracle_payer_paid", "_oracle_sender_received",
+        "_oracle_payer_trunc_n", "_oracle_payer_trunc_amt",
+        "_oracle_budget_trunc_n", "_oracle_budget_trunc_amt",
+        "_oracle_payer_broke_n", "_oracle_budget_exhausted_n",
+        # ---- 内评 §三 观察项 1/2：**接收侧效应**（方向翻转新引入；按 cell 键控）----
+        # 接收者在 t 付款、t+1 在其**成交落点**进食 ⇒ 记录落点，下一 tick 进食时实测摄入。
+        # 目的：判断「吃到 − 回付」是否仍 ≥ 不通信者的平均摄入（若为负 ⇒ 规避标记格的激励）。
+        "_recv_pend_cells", "_recv_pay_sum",
+        "_recv_food_sum", "_recv_food_n", "_all_food_sum", "_all_food_n",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -330,6 +343,22 @@ class SphereEngine:
         # 守恒三账审计（R102 条件 1 修正版）
         self._audit_calls = 0
         self._audit_sum_delta = 0.0
+        # oracle 对账（三账应恒等）+ 偿付约束量化（内评 §四）
+        self._oracle_payer_paid = 0.0
+        self._oracle_sender_received = 0.0
+        self._oracle_payer_trunc_n = 0
+        self._oracle_payer_trunc_amt = 0.0
+        self._oracle_budget_trunc_n = 0
+        self._oracle_budget_trunc_amt = 0.0
+        self._oracle_payer_broke_n = 0
+        self._oracle_budget_exhausted_n = 0
+        # 接收侧效应（内评 §三 观察项 1）：成交落点 → 下一 tick 实测摄入
+        self._recv_pend_cells: list[int] = []
+        self._recv_pay_sum = 0.0
+        self._recv_food_sum = 0.0
+        self._recv_food_n = 0
+        self._all_food_sum = 0.0
+        self._all_food_n = 0
         if self._oracle_on and self._use_sim_core:
             # C-8：静默忽略会重演 R14"配置看似生效实则没生效" ⇒ 显式报错
             raise RuntimeError(
@@ -619,6 +648,11 @@ class SphereEngine:
         # 4) 进食：从格子里吃进胃（先吃后扣基础维持，保证当天能吃到）
         #    饱食度：胃容量上限（基础 = max_energy/eat_efficiency/2，g5 缩放 0.5~2 倍）
         #    进食量：每 tick 最多 eat_amount（g4 缩放 0.5~1.5 倍）
+        # 内评 §三 观察项 1：取出上一 tick 的 oracle 成交落点（**只消费一次**，保证
+        # 「t 付款 → t+1 在落点进食」的时序对应；无 oracle 时零开销）
+        pend_cells = self._recv_pend_cells
+        if self._oracle_on:
+            self._recv_pend_cells = []
         eat_mult = 0.5 + genes[:, Gene.EAT_AMOUNT] * 1.0
         cap_mult = 0.5 + genes[:, Gene.STOMACH_CAP] * 1.5
         stomach_cap = (
@@ -639,6 +673,19 @@ class SphereEngine:
             else:
                 taken = self.resources.consume_many(self._flat[eaters], want)
             stomach[eaters] += taken
+            # 内评 §三 观察项 1（接收侧净能量效应）：**实测**成交落点上的摄入，并同时
+            # 记「全体进食者」的平均摄入作基线（= "不通信者"的参照）。
+            # ⚠️ 按 **cell** 键控（非个体）：同格多人时会把他们的摄入一并计入 ⇒ 属近似，
+            #    报告口径须写明（见 receiver_side_effects 的 note）。
+            if self._oracle_on:
+                self._all_food_sum += float(taken.sum())
+                self._all_food_n += int(taken.size)
+                if pend_cells:
+                    pc = np.unique(np.asarray(pend_cells, dtype=np.int64))
+                    hit = np.isin(self._flat[eaters], pc)
+                    if hit.any():
+                        self._recv_food_sum += float(taken[hit].sum())
+                        self._recv_food_n += int(hit.sum())
             # 邻格觅食（g10）：自己格不够吃的个体，随机吃一格外邻格
             short = want - taken
             hung = np.flatnonzero(short > 1e-9)
@@ -1427,12 +1474,14 @@ class SphereEngine:
         self._diag_budget_ok += int((found & win & (s_ids != r_id) & (budget > 0)).sum())
         if not ok.any():
             return
+        led: dict = {}
         total, cnt, s_kept, g_kept = apply_oracle(
             energy=energy,
             receiver_slots=rc[ok].astype(np.int64),
             sender_slots=s_slot[ok],
             budget=budget[ok],
             donation=ocfg.donation,
+            ledger=led,          # 内评 §四：对账 + 偿付截断量化（纯观测，不改转移结果）
         )
         if cnt:
             self._diag_applied += int(cnt)
@@ -1443,6 +1492,22 @@ class SphereEngine:
             np.add.at(self._oracle_gain, self._id[s_kept], g_kept)
             self._oracle_transfers += total
             self._oracle_count += cnt
+            # R102 条件 1/3：三账 + 偿付约束（逐笔累加）
+            self._oracle_payer_paid += float(led["payer_paid"])
+            self._oracle_sender_received += float(led["sender_received"])
+            self._oracle_payer_trunc_n += int(led["payer_trunc_n"])
+            self._oracle_payer_trunc_amt += float(led["payer_trunc_amt"])
+            self._oracle_budget_trunc_n += int(led["budget_trunc_n"])
+            self._oracle_budget_trunc_amt += float(led["budget_trunc_amt"])
+            self._oracle_payer_broke_n += int(led["payer_broke_n"])
+            self._oracle_budget_exhausted_n += int(led["budget_exhausted_n"])
+            # 内评 §三 观察项 1：记下**成交落点**（下一 tick 进食时实测接收侧摄入）
+            ai = led["applied_idx"]
+            if ai:
+                self._recv_pend_cells.extend(
+                    cc[ok][np.asarray(ai, dtype=np.int64)].tolist()
+                )
+                self._recv_pay_sum += float(led["payer_paid"])
 
     def signal_response_stats(self) -> dict:
         """D-18 ⑥ 三联报（累计口径）：⑥a 暴露率 / ⑥b mean Δ_i / ⑥ = ⑥a×⑥b + 翻转率。
@@ -1479,6 +1544,65 @@ class SphereEngine:
             "funnel": self.oracle_funnel(),   # D-26a 四环节诊断
             # R102 条件 1（修正版）：守恒三账审计（撤销"净注入"口径）
             "audit": self.oracle_audit(),
+            # 内评 §四：对账字段（三账**应恒等**，由构造保证；**定位=对账+偿付量化**，
+            # 不是"守恒检验"——守恒由转移结构即保证，加一个恒真字段必须标注定位）
+            "ledger": self.oracle_ledger(),
+            # 内评 §三 观察项 1/2：接收侧效应（方向翻转新引入；`[推断]` → 实测量化）
+            "receiver_side": self.receiver_side_effects(),
+        }
+
+    def oracle_ledger(self) -> dict:
+        """R102 条件 3 + 内评 §四：**对账字段**（`Σpayer 扣减 ≡ Σ收款入账`）+ 偿付约束量化。
+
+        ⚠️ 定位说明（内评 §四 命名建议，已采纳）：三账恒等由 `apply_oracle` 的逐笔
+        「扣减 == 入账」**结构**保证 ⇒ **本字段是"对账"而非"守恒检验"**，它抓不到
+        "守恒被破坏"（那种情况由 `oracle_audit` 的独立实测 ΔΣenergy 负责证伪）。
+        真正有信息量的是**偿付约束**三项：`payer_trunc_*`（付款方付不起 ⇒ 部分支付）、
+        `payer_broke_n`（余额为 0 ⇒ 整笔跳过）、`budget_exhausted_n`（收款方额度用尽）。
+        """
+        return {
+            "sum_transfers": round(float(self._oracle_transfers), 6),
+            "payer_paid": round(float(self._oracle_payer_paid), 6),
+            "sender_received": round(float(self._oracle_sender_received), 6),
+            "identity_ok": bool(
+                abs(self._oracle_payer_paid - self._oracle_sender_received) <= 1e-9
+            ),
+            "payer_trunc_n": int(self._oracle_payer_trunc_n),
+            "payer_trunc_amt": round(float(self._oracle_payer_trunc_amt), 6),
+            "payer_broke_n": int(self._oracle_payer_broke_n),
+            "budget_trunc_n": int(self._oracle_budget_trunc_n),
+            "budget_trunc_amt": round(float(self._oracle_budget_trunc_amt), 6),
+            "budget_exhausted_n": int(self._oracle_budget_exhausted_n),
+            "role": "对账（三账恒等由构造保证）+ 偿付约束量化；非守恒检验",
+        }
+
+    def receiver_side_effects(self) -> dict:
+        """内评《复核-R102方向修复》§三 观察项 1：**接收侧净能量效应**。
+
+        方向翻转（F-R18）把"接收者获益"变成"接收者付出" ⇒ 需量化：接收者
+        **吃到（t+1 在成交落点的实测摄入）− 回付（t 的 payment）** 是否仍 ≥
+        不通信者的平均摄入。若净值为负 ⇒ 移动到标记格变成净亏 ⇒ 行为会变
+        （观察项 2 的 ⑥ 响应率下降即其表现；**不得**读成"信号无用"）。
+
+        ⚠️ **口径（按 cell 键控，属近似）**：落点以**格**记录，同格若有多人，
+        他们的摄入会一并计入接收侧；且接收者可能在进食前死亡 ⇒ 分子偏小。
+        ⇒ 本字段作**量级判断**用，不作精确个体账。
+        """
+        ev = max(1, int(self._oracle_count))
+        fn = max(1, int(self._recv_food_n))
+        bn = max(1, int(self._all_food_n))
+        mean_recv = self._recv_food_sum / fn
+        mean_base = self._all_food_sum / bn
+        mean_pay = self._recv_pay_sum / ev
+        return {
+            "events": int(self._oracle_count),
+            "food_events": int(self._recv_food_n),
+            "mean_intake_at_paid_cell": round(float(mean_recv), 6),
+            "mean_intake_all_eaters": round(float(mean_base), 6),
+            "mean_payment_per_event": round(float(mean_pay), 6),
+            "net_eat_minus_pay": round(float(mean_recv - mean_pay), 6),
+            "net_vs_baseline": round(float(mean_recv - mean_pay - mean_base), 6),
+            "caveat": "落点按 cell 键控（同格多人并入；接收者可能进食前死亡）⇒ 量级判断用",
         }
 
     def oracle_audit(self) -> dict:

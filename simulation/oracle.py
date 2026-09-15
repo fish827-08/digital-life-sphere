@@ -65,6 +65,7 @@ def apply_oracle(
     sender_slots: NDArray[np.int64],
     budget: NDArray[np.float64],
     donation: float,
+    ledger: dict | None = None,
 ) -> tuple[float, int, NDArray[np.int64], NDArray[np.float64]]:
     """纯转移核：**R → S** 能量转移（接收者回付发送者；F-R18 方向修正）。
 
@@ -86,34 +87,73 @@ def apply_oracle(
 
     不变量：Σenergy 守恒（C-2：**纯再分配、零注入**）；零 RNG；`energy[付款方]` 不为负；
     **同一收款者对多笔顺序累加额度**（确定性：接收者数组顺序，F-R16 修复保留）。
+
+    `ledger`（可选，**仅写入、不参与任何计算**）—— 供引擎做 R102 §四 / 内评 §四 要求的
+    **对账与偿付约束量化**；填 `payer_paid` / `sender_received` / `payer_trunc_*` /
+    `budget_trunc_*` / `payer_broke_n` / `budget_exhausted_n` / `applied_idx`。
+    ⚠️ 该参数**不改变随机流、不改变转移结果**（纯观测），引擎侧有「与无仪器的同配置跑
+    逐位一致」的对照检查。
     """
     total = 0.0
     kept_s: list[int] = []
     kept_g: list[float] = []
     n = 0
+    # R102 条件 1/3（修正版）+ 内评 §四：对账与偿付约束量化（纯观测计数）
+    payer_trunc_n = 0
+    payer_trunc_amt = 0.0
+    budget_trunc_n = 0
+    budget_trunc_amt = 0.0
+    payer_broke_n = 0          # 付款方能量为 0 ⇒ 整笔跳过
+    budget_exhausted_n = 0     # 收款方额度用尽 ⇒ 整笔跳过
+    applied_idx: list[int] = []
     # F-R16：每**收款者**（发送者）的剩余额度（首次出现时以配对 budget 为初始值，之后逐笔扣减）
     remaining: dict[int, float] = {}
-    for s, r, b in zip(
+    for i, (s, r, b) in enumerate(zip(
         sender_slots.tolist(), receiver_slots.tolist(), budget.tolist()
-    ):
+    )):
         if s < 0 or r < 0:
             continue
         if s not in remaining:
             remaining[s] = float(b)
         rem = remaining[s]
         if rem <= 0:
+            budget_exhausted_n += 1
             continue
         # F-R18：偿付能力约束在**付款方**（接收者 r）身上
-        g = min(float(donation), float(rem), float(energy[r]))
+        avail = float(energy[r])
+        if avail <= 0:
+            payer_broke_n += 1
+            continue
+        d = float(donation)
+        g = min(d, rem, avail)
         if g <= 0:
             continue
+        if g < d:                       # 部分支付：归因到更紧的那一侧
+            short = d - g
+            if avail <= rem:            # 付款方付不起 ⇒ **偿付截断**
+                payer_trunc_n += 1
+                payer_trunc_amt += short
+            else:                       # 收款方额度上限 ⇒ 额度截断
+                budget_trunc_n += 1
+                budget_trunc_amt += short
         energy[r] -= g          # 接收者付款（付款方偿付能力受限）
         energy[s] += g          # 发送者收款（F-R18 方向修正）
         remaining[s] = rem - g
         total += g
         kept_s.append(int(s))
         kept_g.append(float(g))
+        applied_idx.append(i)
         n += 1
+    if ledger is not None:
+        ledger["payer_paid"] = total
+        ledger["sender_received"] = total
+        ledger["payer_trunc_n"] = payer_trunc_n
+        ledger["payer_trunc_amt"] = payer_trunc_amt
+        ledger["budget_trunc_n"] = budget_trunc_n
+        ledger["budget_trunc_amt"] = budget_trunc_amt
+        ledger["payer_broke_n"] = payer_broke_n
+        ledger["budget_exhausted_n"] = budget_exhausted_n
+        ledger["applied_idx"] = applied_idx
     return (
         total,
         n,
