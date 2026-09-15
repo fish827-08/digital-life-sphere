@@ -27,6 +27,13 @@
    ⇒ `oracle_return_ratio = Σ回馈 / Σ(发射×成本) ≤ 1` **由构造保证**（O-7 上界），
    oracle 只可能"补偿"不可能"补贴"。比规格 (a) 更保守，方向一致。
 5. **零新增 RNG、能量守恒、不自反馈、不使能量为负**（C-1/C-2/C-3）。
+6. 🔴 **F-R18（2026-09-15 修）方向 = `R → S`（接收者回付发送者）**：原实现写成了
+   `energy[S] -= g; energy[R] += g`（**发送者倒贴**），与本文件 docstring「回给发送者」、
+   引擎 `budget` 注释「已获回馈」、`oracle_return_ratio` 命名、以及"**正向**对照"的
+   验收判据（"oracle 开 ⇒ g15 上升"）**全部相反** —— 属"规格骨架误被逐字实现"，
+   该装置实际是「惩罚发射者」⇒ 对 `g15` 是**负选择**，原理上不可能达成验收判据。
+   现修正为 **接收者（觅到食物者，付得起）付款、发送者收款**；C-2 **仍守恒**（纯再分配，
+   无注入）。详见 `_share/规格-V1-oracle引擎级-20260913.md` 勘误节与讨论板 R102/F-R18。
 """
 from __future__ import annotations
 
@@ -59,33 +66,32 @@ def apply_oracle(
     budget: NDArray[np.float64],
     donation: float,
 ) -> tuple[float, int, NDArray[np.int64], NDArray[np.float64]]:
-    """纯转移核：S→R 能量转移（保本封顶内）。
+    """纯转移核：**R → S** 能量转移（接收者回付发送者；F-R18 方向修正）。
 
     参数
     ----
     energy : 引擎工作能量数组（就地修改）
     receiver_slots / sender_slots : 已解析好的**当前槽位**（发送者 -1 = 已死/来路不明）
-    budget : 每对转移的剩余保本额度（≤0 ⇒ 不转移）
+    budget : 每对转移中**收款方（发送者）**的剩余保本额度（≤0 ⇒ 不转移）
     donation : 单次转移量
+
+    ⚠️ **方向约定（F-R18）**：`receiver_slots` = **付款方**（接收者/移动者，刚觅到食物），
+    `sender_slots` = **收款方**（信号写入者）。与 `oracle_return_ratio`、
+    「已获回馈」、「保本封顶」等既有命名一致。
 
     返回
     ----
-    (总转移量, 次数, 成交发送者槽位, 成交金额) —— 供引擎按 `_id` 累计 `_oracle_gain`。
+    (总转移量, 次数, 成交**收款者**槽位, 成交金额) —— 供引擎按 `_id` 累计 `_oracle_gain`
+    （= 发送者**已获回馈**）。
 
-    不变量：Σenergy 守恒（浮点容差内）；零 RNG；`energy[s]` 不为负；
-    同一发送者对多接收者顺序扣减（确定性：接收者数组顺序）。
-
-    ⚠️ **F-R16 修复（2026-09-15）**：原实现**没有**真的顺序扣减——每个 (s,r) 对都用
-    配对时算好的同一个 `budget` 快照 ⇒ 同一发送者在同一 tick 内可获 **多次满额** 转移
-    （实测：budget=0.06、donation=0.05、同一发送者 2 次 ⇒ 实付 0.10 > 0.06），
-    **突破 C-9 保本封顶** ⇒ `oracle_return_ratio` 实测越过 1.0（`dose1.0_s42` = 1.0163），
-    破坏 O-7"ratio ≤ 1"设计不变量。现改为**按发送者维护剩余额度、逐笔扣减**。
+    不变量：Σenergy 守恒（C-2：**纯再分配、零注入**）；零 RNG；`energy[付款方]` 不为负；
+    **同一收款者对多笔顺序累加额度**（确定性：接收者数组顺序，F-R16 修复保留）。
     """
     total = 0.0
     kept_s: list[int] = []
     kept_g: list[float] = []
     n = 0
-    # F-R16：每发送者的**剩余额度**（首次出现时以配对 budget 为初始值，之后逐笔扣减）
+    # F-R16：每**收款者**（发送者）的剩余额度（首次出现时以配对 budget 为初始值，之后逐笔扣减）
     remaining: dict[int, float] = {}
     for s, r, b in zip(
         sender_slots.tolist(), receiver_slots.tolist(), budget.tolist()
@@ -97,11 +103,12 @@ def apply_oracle(
         rem = remaining[s]
         if rem <= 0:
             continue
-        g = min(float(donation), float(rem), float(energy[s]))
+        # F-R18：偿付能力约束在**付款方**（接收者 r）身上
+        g = min(float(donation), float(rem), float(energy[r]))
         if g <= 0:
             continue
-        energy[s] -= g
-        energy[r] += g
+        energy[r] -= g          # 接收者付款（付款方偿付能力受限）
+        energy[s] += g          # 发送者收款（F-R18 方向修正）
         remaining[s] = rem - g
         total += g
         kept_s.append(int(s))

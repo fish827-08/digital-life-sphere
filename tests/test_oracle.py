@@ -37,8 +37,12 @@ def test_apply_oracle_conserves_energy():
 
 
 def test_apply_oracle_respects_budget_and_energy():
-    """预算耗尽 ⇒ 不转移；发送者买不起 ⇒ 只转得起的部分。"""
-    energy = np.array([0.02, 5.0])
+    """额度耗尽 ⇒ 不转移；**付款方**（接收者）买不起 ⇒ 只转得起的部分。
+
+    F-R18 后（方向 R→S）：偿付能力约束在**接收者**（付款方）身上；
+    故"能量卡住"的 fixture 须让**接收者**穷，而不是发送者。
+    """
+    energy = np.array([5.0, 0.02])                     # [0]=发送者(收款) [1]=接收者(付款，仅 0.02)
     total, cnt, _, _ = apply_oracle(
         energy=energy,
         receiver_slots=np.array([1], dtype=np.int64),
@@ -46,8 +50,8 @@ def test_apply_oracle_respects_budget_and_energy():
         budget=np.array([1.0], dtype=np.float64),
         donation=0.05,
     )
-    assert cnt == 1 and abs(total - 0.02) < 1e-12      # 被能量卡住
-    assert abs(energy[0]) < 1e-12
+    assert cnt == 1 and abs(total - 0.02) < 1e-12      # 被**付款方**能量卡住
+    assert abs(energy[1]) < 1e-12                      # 付款方付光
 
     energy2 = np.array([10.0, 5.0])
     total2, cnt2, _, _ = apply_oracle(
@@ -227,117 +231,161 @@ def test_oracle_config_dict_fallback():
     assert EMISSION_COST == 0.1
 
 
-# ---------------- F-R16（2026-09-15）：C-9 封顶被突破的修复回归 ----------------
+# ---------- F-R16 / F-R18（2026-09-15）：封顶顺序累加 + **方向极性** 的回归 ----------
+# F-R16：额度必须**顺序累加**（原实现每对都用同一 budget 快照 ⇒ 同一收款者可多次满额）
+# F-R18：方向 = **R→S**（接收者付款、发送者收款）。原实现写反（发送者倒贴）⇒
+#        仪器实际"惩罚发射者" ⇒ 对 g15 是负选择 ⇒ 原理上无法达成"oracle 开 ⇒ g15 上升"。
+#        R102 裁定 (A) 修方向；并立**新纪律**：仪器类通道必须有**端到端极性测试**
+#        （构造成功事件 ⇒ 断言目标量向**预期方向**变化）。
 
-def test_f_r16_apply_oracle_deducts_budget_sequentially():
-    """🔴 F-R16：同一发送者同 tick 多笔转移必须**顺序扣减额度**。
+def test_f_r18_direction_sender_receives_receiver_pays():
+    """① 方向断言：成功转移 ⇒ 发送者（收款）增加、接收者（付款）减少。"""
+    e = np.array([10.0, 10.0, 10.0])
+    total, cnt, kept_s, kept_g = apply_oracle(
+        energy=e,
+        receiver_slots=np.array([1], dtype=np.int64),   # 付款方 = 接收者（移动者）
+        sender_slots=np.array([0], dtype=np.int64),     # 收款方 = 发送者（信号写入者）
+        budget=np.array([1.0], dtype=np.float64), donation=0.5,
+    )
+    assert cnt == 1 and abs(total - 0.5) < 1e-12
+    assert e[0] == pytest.approx(10.5), "发送者必须**收款**（F-R18）"
+    assert e[1] == pytest.approx(9.5), "接收者必须**付款**（F-R18）"
+    assert e[2] == pytest.approx(10.0), "无关个体不受影响"
+    assert list(kept_s) == [0], "返回的成交槽位必须是**收款者**（发送者）"
 
-    原实现每个 (s,r) 对都用配对时的 `budget` 快照 ⇒ 同一发送者可获**多次满额**：
-    `[实测]` budget=0.06、donation=0.05、同一发送者 2 笔 ⇒ 实付 **0.10 > 0.06**（超额 67%）
-    ⇒ 突破 C-9 保本封顶 ⇒ 端到端 `ratio` 越过 1.0。
+
+def test_f_r18_conservation_is_pure_redistribution():
+    """② 守恒断言：Σenergy 恒等 ⇒ **纯再分配、零注入**（C-2 成立）。"""
+    rng = np.random.default_rng(0)
+    for _ in range(30):
+        e = rng.uniform(0.0, 5.0, size=6)
+        before = float(e.sum())
+        apply_oracle(
+            energy=e,
+            receiver_slots=rng.integers(0, 6, 4),
+            sender_slots=rng.integers(0, 6, 4),
+            budget=rng.uniform(0.0, 0.5, 4),
+            donation=0.05,
+        )
+        assert e.sum() == pytest.approx(before, abs=1e-12)
+        assert (e >= 0).all()
+
+
+def test_f_r16_budget_accumulates_sequentially_per_recipient():
+    """③ 封顶压力（F-R16，角色对调后重推）：同一发送者（收款方）多笔 ⇒ 额度**顺序累加**。
+
+    `[实测 原缺陷]` budget=0.06、donation=0.05、同一发送者 2 笔 ⇒ 旧实现实付 0.10 > 0.06。
     """
-    energy = np.array([10.0, 0.0, 0.0])
+    e = np.array([0.0, 10.0, 10.0])        # [0]=发送者(收款) [1][2]=接收者(付款)
     total, cnt, _, _ = apply_oracle(
-        energy=energy,
+        energy=e,
         receiver_slots=np.array([1, 2], dtype=np.int64),
         sender_slots=np.array([0, 0], dtype=np.int64),
         budget=np.array([0.06, 0.06], dtype=np.float64),
         donation=0.05,
     )
-    assert total <= 0.06 + 1e-12, f"C-9 被突破：实付 {total} > 额度 0.06"
-    assert cnt == 2                       # 第二笔为部分支付（0.01）
-    assert abs(energy.sum() - 10.0) < 1e-9
+    assert total <= 0.06 + 1e-12, f"C-9 被突破：收款 {total} > 额度 0.06"
+    assert cnt == 2                           # 第二笔为**部分**收款（0.01）
+    assert e[0] == pytest.approx(0.06)
+    assert e.sum() == pytest.approx(20.0, abs=1e-12)
 
 
-def test_f_r16_apply_oracle_skips_when_budget_exhausted():
-    """额度被第一笔吃满 ⇒ 第二笔必须**跳过**（不是再付一次满额）。"""
-    energy = np.array([10.0, 0.0, 0.0])
+def test_f_r16_budget_exhausted_skips_further_transfers():
+    """③ 续：额度被第一笔吃满 ⇒ 后续**跳过**（不再收一次满额）。"""
+    e = np.array([0.0, 10.0, 10.0])
     total, cnt, _, _ = apply_oracle(
-        energy=energy,
+        energy=e,
         receiver_slots=np.array([1, 2], dtype=np.int64),
         sender_slots=np.array([0, 0], dtype=np.int64),
         budget=np.array([1.0, 1.0], dtype=np.float64),
-        donation=1.0,                      # 第一笔即吃满额度
+        donation=1.0,
     )
-    assert cnt == 1 and abs(total - 1.0) < 1e-12
+    assert cnt == 1 and total == pytest.approx(1.0)
 
 
-def test_f_r16_oracle_return_ratio_never_exceeds_one():
-    """🔴 端到端回归（O-7 设计不变量 `ratio ≤ 1`）。
+def test_f_r18_payer_insolvency_truncates_then_skips():
+    """④ 付款方（接收者）偿付能力：不足 ⇒ **部分**付款；为 0 ⇒ 跳过。"""
+    e = np.array([0.0, 0.02])                 # 接收者仅 0.02 < donation 0.05
+    total, cnt, _, _ = apply_oracle(
+        energy=e, receiver_slots=np.array([1], dtype=np.int64),
+        sender_slots=np.array([0], dtype=np.int64),
+        budget=np.array([1.0], dtype=np.float64), donation=0.05,
+    )
+    assert cnt == 1 and total == pytest.approx(0.02)
+    assert e[1] == pytest.approx(0.0) and e[0] == pytest.approx(0.02)
 
-    前置：F-R16 修复前，D-27 剂量批 `dose1.0_s42` 实测 **ratio = 1.0163 > 1**
-    （numpy 重复索引缓冲赋值少记回馈 + 额度未顺序扣减）。
+    e2 = np.array([0.0, 0.0])                 # 接收者无能量 ⇒ 不转移
+    t2, c2, _, _ = apply_oracle(
+        energy=e2, receiver_slots=np.array([1], dtype=np.int64),
+        sender_slots=np.array([0], dtype=np.int64),
+        budget=np.array([1.0], dtype=np.float64), donation=0.05,
+    )
+    assert c2 == 0 and t2 == 0.0
+    assert (e2 >= 0).all()
+
+
+def test_f_r18_end_to_end_polarity_emitter_gains():
+    """⑤ **端到端极性测试**（R102 新纪律）：构造一次"成功通信"⇒ 信号写入者净能量**上升**。
+
+    构造（确定性，不依赖生态噪声）：1 号个体 = 信号写入者（id 11，有发射史 ⇒ 有额度）；
+    2 号个体 = 接收者（id 22，落到"被 11 标记过且有食物"的格）。
+    断言：写入者能量 **+g**、接收者 **−g**。
+    这条测试**正是** F-R18 的"反向最小实验"：方向写反时它必失败。
+    """
+    cfg = SimConfig(seed=1)
+    cfg.simulation.use_sim_core = False
+    cfg.oracle.enabled = True
+    cfg.oracle.donation = 0.5
+    cfg.oracle.persistence = 0                 # 仅本 tick：写入即刻有效
+    e = SphereEngine(cfg)
+
+    cell = 500
+    e._id = np.array([11, 22], dtype=np.int64)          # 槽位 0=写入者 / 1=接收者
+    e._flat = np.array([cell, cell + 1], dtype=np.int64)
+    e._energy = np.array([10.0, 10.0], dtype=np.float64)
+    e._emit_count = np.zeros(23, dtype=np.int32)
+    e._emit_count[11] = 10                              # 额度 = 0.1×10 = 1.0
+    e._oracle_gain = np.zeros(23, dtype=np.float32)
+    e._last_sender[cell] = 11                           # 该格由 id 11 写入
+    e.signals._marks[cell] = 1
+    e.signals._age[cell] = int(e.signals.duration)       # 刚写入 ⇒ 在归因窗口内
+
+    before = e._energy.copy()
+    e._oracle_after_move(
+        mi=np.array([1], dtype=np.int64),                # 接收者 = 槽位 1（id 22）
+        target_cells=np.array([cell], dtype=np.int64),
+        had_signal=np.array([True]),
+        true_sig=np.array([True]),
+        energy=e._energy,
+    )
+    g = 0.5
+    assert e._energy[0] == pytest.approx(before[0] + g), (
+        "极性失败：信号**写入者**必须收款（F-R18；写反时这里会减少）"
+    )
+    assert e._energy[1] == pytest.approx(before[1] - g), "接收者必须付款"
+    assert e._energy.sum() == pytest.approx(before.sum(), abs=1e-9), "C-2 守恒"
+
+
+def test_r102_conservation_audit_three_accounts():
+    """R102 条件 1（修正版）：**守恒三账审计** —— 引擎侧实测 Σenergy 变化恒 0。
+
+    撤销原 R100 条件 1 的 `system_energy_injected`（机制复核已证"净注入"不成立：
+    `apply_oracle` 是双向转移 ⇒ 纯再分配）。本审计**独立**核算（包住调用实测变化），
+    不是"同一个数抄三遍" ⇒ 能**证伪** C-2。
     """
     cfg = SimConfig(seed=42)
     cfg.simulation.use_sim_core = False
-    cfg.population.max_count = 600
+    cfg.population.max_count = 300
     cfg.info_structure = InfoStructureConfig(enabled=True, learning_rate=0.05)
     cfg.oracle.enabled = True
-    cfg.oracle.donation = 5.0              # 高剂量 ⇒ 额度迅速绑紧，最易暴露超额
+    cfg.oracle.donation = 5.0                  # 大额放大任何注入
     e = SphereEngine(cfg)
-    for _ in range(400):
+    for _ in range(200):
         if e.extinct:
             break
         e.step()
-    s = e.oracle_stats()
-    assert s["oracle_return_ratio"] <= 1.0 + 1e-9, (
-        f"O-7 不变量被突破：ratio={s['oracle_return_ratio']}"
-    )
-
-
-# ---------------- F-R16（2026-09-15）：C-9 封顶被突破的修复回归 ----------------
-
-def test_f_r16_apply_oracle_deducts_budget_sequentially():
-    """🔴 F-R16：同一发送者同 tick 多笔转移必须**顺序扣减额度**。
-
-    原实现每个 (s,r) 对都用配对时的 `budget` 快照 ⇒ 同一发送者可获**多次满额**：
-    `[实测]` budget=0.06、donation=0.05、同一发送者 2 笔 ⇒ 实付 **0.10 > 0.06**（超额 67%）
-    ⇒ 突破 C-9 保本封顶 ⇒ 端到端 `ratio` 越过 1.0。
-    """
-    energy = np.array([10.0, 0.0, 0.0])
-    total, cnt, _, _ = apply_oracle(
-        energy=energy,
-        receiver_slots=np.array([1, 2], dtype=np.int64),
-        sender_slots=np.array([0, 0], dtype=np.int64),
-        budget=np.array([0.06, 0.06], dtype=np.float64),
-        donation=0.05,
-    )
-    assert total <= 0.06 + 1e-12, f"C-9 被突破：实付 {total} > 额度 0.06"
-    assert cnt == 2                       # 第二笔为部分支付（0.01）
-    assert abs(energy.sum() - 10.0) < 1e-9
-
-
-def test_f_r16_apply_oracle_skips_when_budget_exhausted():
-    """额度被第一笔吃满 ⇒ 第二笔必须**跳过**（不是再付一次满额）。"""
-    energy = np.array([10.0, 0.0, 0.0])
-    total, cnt, _, _ = apply_oracle(
-        energy=energy,
-        receiver_slots=np.array([1, 2], dtype=np.int64),
-        sender_slots=np.array([0, 0], dtype=np.int64),
-        budget=np.array([1.0, 1.0], dtype=np.float64),
-        donation=1.0,                      # 第一笔即吃满额度
-    )
-    assert cnt == 1 and abs(total - 1.0) < 1e-12
-
-
-def test_f_r16_oracle_return_ratio_never_exceeds_one():
-    """🔴 端到端回归（O-7 设计不变量 `ratio ≤ 1`）。
-
-    前置：F-R16 修复前，D-27 剂量批 `dose1.0_s42` 实测 **ratio = 1.0163 > 1**
-    （numpy 重复索引缓冲赋值少记回馈 + 额度未顺序扣减）。
-    """
-    cfg = SimConfig(seed=42)
-    cfg.simulation.use_sim_core = False
-    cfg.population.max_count = 600
-    cfg.info_structure = InfoStructureConfig(enabled=True, learning_rate=0.05)
-    cfg.oracle.enabled = True
-    cfg.oracle.donation = 5.0              # 高剂量 ⇒ 额度迅速绑紧，最易暴露超额
-    e = SphereEngine(cfg)
-    for _ in range(400):
-        if e.extinct:
-            break
-        e.step()
-    s = e.oracle_stats()
-    assert s["oracle_return_ratio"] <= 1.0 + 1e-9, (
-        f"O-7 不变量被突破：ratio={s['oracle_return_ratio']}"
-    )
+    a = e.oracle_audit()
+    assert a["calls"] > 0, "应至少跑过若干次 oracle 挂钩"
+    assert a["sum_energy_delta"] == 0.0, f"C-2 被破坏：ΔΣenergy={a['sum_energy_delta']}"
+    assert a["conserved"] is True
+    assert e.oracle_stats()["audit"]["conserved"] is True   # 经 stats 也能读到

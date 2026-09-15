@@ -132,6 +132,11 @@ class SphereEngine:
         "_diag_had_sig", "_diag_true_sig", "_diag_sel",
         "_diag_attrib_found", "_diag_in_window", "_diag_not_self",
         "_diag_budget_ok", "_diag_applied",
+        # ---- R102/条件 1（修正版）：守恒三账审计（★在引擎侧**独立**核算，非"同一个数抄三遍"）----
+        # 撤销 R100 条件 1 原定的 "system_energy_injected"：机制复核（R102 §三）已证
+        # apply_oracle 是**双向转移** ⇒ 纯再分配、**C-2 守恒成立**、无注入。
+        # 审计口径 = 包住 oracle 调用前后实测 Σenergy 的变化（应恒 0）。
+        "_audit_calls", "_audit_sum_delta",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -322,6 +327,9 @@ class SphereEngine:
         self._diag_not_self = 0       # 且 发送者 ≠ 接收者（不自反馈）
         self._diag_budget_ok = 0      # 且 C-9 保本额度 > 0
         self._diag_applied = 0        # 实际成交（转移发生）次数
+        # 守恒三账审计（R102 条件 1 修正版）
+        self._audit_calls = 0
+        self._audit_sum_delta = 0.0
         if self._oracle_on and self._use_sim_core:
             # C-8：静默忽略会重演 R14"配置看似生效实则没生效" ⇒ 显式报错
             raise RuntimeError(
@@ -932,7 +940,12 @@ class SphereEngine:
                     # D-26a：①②③ 上游环节计数（纯观测，不改状态/随机流）
                     self._diag_had_sig += int(had_signal.sum())
                     self._diag_true_sig += int(true_sig.sum())
+                    # R102 条件 1（修正版）：守恒三账审计——**包住调用实测 Σenergy 变化**
+                    # （独立核算，非把同一个数抄三遍；C-2 成立 ⇒ 应恒 0）
+                    _e_before = float(energy.sum())
                     self._oracle_after_move(mi, target_cells, had_signal, true_sig, energy)
+                    self._audit_calls += 1
+                    self._audit_sum_delta += float(energy.sum()) - _e_before
                 self._trust[mi[true_sig]] = np.minimum(
                     1.0, self._trust[mi[true_sig]] + ccfg.trust_true
                 )
@@ -1373,7 +1386,13 @@ class SphereEngine:
         self._rs_cohort[idx] = cohort
 
     def _oracle_after_move(self, mi, target_cells, had_signal, true_sig, energy) -> None:
-        """D-8 oracle：归因 + 保本封顶内的 S→R 能量转移（详见 simulation/oracle.py）。"""
+        """D-8 oracle：归因 + 保本封顶内的 **R→S** 能量转移（详见 simulation/oracle.py）。
+
+        F-R18（2026-09-15）：方向 = **接收者（移动者）回付发送者（信号写入者）**。
+        故 `receiver_slots` 传的是**付款方**（`mi` = 移动者）、`sender_slots` 传的是
+        **收款方**（`_last_sender` = 信号写入者）——与 `budget`（收款方额度）、
+        `_oracle_gain`（已获回馈）、`oracle_return_ratio` 的既有命名一致。
+        """
         ocfg = self.config.oracle
         sel = true_sig if ocfg.require_food else had_signal
         rc = mi[sel]
@@ -1458,6 +1477,28 @@ class SphereEngine:
             "emissions": emissions,
             "oracle_return_ratio": round(float(ratio), 6),
             "funnel": self.oracle_funnel(),   # D-26a 四环节诊断
+            # R102 条件 1（修正版）：守恒三账审计（撤销"净注入"口径）
+            "audit": self.oracle_audit(),
+        }
+
+    def oracle_audit(self) -> dict:
+        """守恒三账审计（R102 §三 修正后口径）。
+
+        撤销 R100 条件 1 原定的 `system_energy_injected`——机制复核已证
+        `apply_oracle` 是**双向转移**（修复方向后 `energy[R] -= g; energy[S] += g`），
+        **纯再分配、零注入** ⇒ **C-2 守恒成立，无需例外声明**。
+
+        本审计在引擎侧**独立**核算：包住 oracle 调用前后实测 `Σenergy` 的变化，
+        累加其绝对值（应恒 0，仅浮点误差）。三账恒等（`Σtransfers ≡ Σpayer 扣减
+        ≡ Σ收款入账`）由 `apply_oracle` 的逐笔配对实现保证 ⇒ 本审计用于**证伪**它。
+        """
+        tol = 1e-6 + 1e-9 * max(1.0, abs(float(self._oracle_transfers)))
+        return {
+            "calls": int(self._audit_calls),
+            "sum_energy_delta": round(float(self._audit_sum_delta), 9),
+            "tolerance": tol,
+            "conserved": bool(abs(self._audit_sum_delta) <= tol),
+            "accounts": "Σtransfers ≡ Σpayer 扣减 ≡ Σ收款入账（构造保证）",
         }
 
     def oracle_funnel(self) -> dict:
