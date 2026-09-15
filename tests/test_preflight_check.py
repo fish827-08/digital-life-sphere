@@ -220,3 +220,44 @@ def test_preflight_report_mentions_c5():
         "main() 未调用 spec_consistency_problems ⇒ C5 未接线"
     )
     assert "C5 规格自洽" in src
+
+
+# ---- R78-3 结构性恒定豁免（2026-09-15 实跑抓到的假警报）----
+
+def test_zero_arm_g15_constant_is_expected_not_failure():
+    """`zero` 臂冻结 g14/g15 ⇒ g15 恒定是**设计意图**，不得判"拒判"。"""
+    ok, exempt, sd, msgs = pf.seed_sensitivity_verdict("zero", "g15_final", [0.5, 0.5, 0.5])
+    assert ok is True and exempt is True and msgs == []
+    assert sd == 0.0
+
+
+def test_zero_arm_g15_varying_means_freeze_broken():
+    """反向自检：该恒定的指标若**有变化** ⇒ 说明冻结没生效 ⇒ 必须失败。"""
+    ok, exempt, _sd, msgs = pf.seed_sensitivity_verdict("zero", "g15_final", [0.5, 0.6, 0.5])
+    assert ok is False and exempt is True
+    assert any("冻结未生效" in m for m in msgs)
+
+
+def test_zero_arm_N_still_checked_normally():
+    """zero 臂的 N **不是**结构性恒定（生态仍随种子变化）⇒ 按常规判。"""
+    ok, exempt, _sd, msgs = pf.seed_sensitivity_verdict("zero", "N_final", [10.0, 10.0, 10.0])
+    assert ok is False and exempt is False and msgs
+    ok2, exempt2, _sd2, _ = pf.seed_sensitivity_verdict("zero", "N_final", [10.0, 12.0, 9.0])
+    assert ok2 is True and exempt2 is False
+
+
+def test_main_arm_constant_still_rejected():
+    """非豁免臂的指标 std≡0 ⇒ 仍按 R78-3 拒判（豁免不得扩大化）。"""
+    ok, exempt, _sd, msgs = pf.seed_sensitivity_verdict("main", "g15_final", [0.4, 0.4, 0.4])
+    assert ok is False and exempt is False
+    assert any("拒判" in m for m in msgs)
+
+
+def test_structurally_constant_table_covers_only_zero_genes():
+    """豁免表只允许"由配置冻结"的项，且只限 zero 臂（防被滥用成免检）。"""
+    assert set(pf.STRUCTURALLY_CONSTANT) == {"zero"}
+    assert pf.STRUCTURALLY_CONSTANT["zero"] == {"g15_final", "g14_final"}
+    # 任何其他臂/指标都不得豁免
+    for arm in ("main", "control", "sigoff", "oracle"):
+        for metric in ("g15_final", "g14_final", "N_final"):
+            assert not pf.is_structurally_constant(arm, metric)

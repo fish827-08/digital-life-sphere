@@ -130,6 +130,12 @@ def main() -> None:
         legacy = out.with_suffix(".snapshot.npz")
         if legacy.exists():
             snap, rngp = legacy, out.with_suffix(".rngstate.pkl")
+    # ---- F-R13：快照目录可能不存在 ----
+    # `--snapshot-dir` 是调用方给的路径，本脚本此前只 mkdir 了 `out.parent`
+    # ⇒ `save_snapshot` 在 `np.savez_compressed` 处抛 FileNotFoundError（实测：
+    # test_f_r10_f_r12 两轮续批集成 2 例失败）。旧命名回退时 snap.parent 即
+    # out.parent（已建），此处幂等，无副作用。
+    snap.parent.mkdir(parents=True, exist_ok=True)
 
     # ---- 断点续跑：快照存在且非 --fresh 则从快照恢复 ----
     resumed = False

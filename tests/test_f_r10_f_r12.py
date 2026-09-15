@@ -141,3 +141,45 @@ def test_two_round_resume_csv_has_no_duplicate_ticks(tmp_path, rounds):
     assert len(ticks) == len(set(ticks)), f"存在重复 tick（F-R12 未修好）: {ticks}"
     assert all(b > a for a, b in zip(ticks, ticks[1:])), f"非单调: {ticks}"
     assert ticks[-1] == 200 * rounds
+
+
+# --------------------------------------------------- F-R13：缺目录 ⇒ 快照崩溃
+
+def test_a4_creates_missing_snapshot_dir(tmp_path):
+    """F-R13：`--snapshot-dir` 指向**不存在**的目录时，a4 必须自建，不得崩。
+
+    预存缺陷：a4 只 mkdir 了 `out.parent`，未建 `--snapshot-dir` ⇒
+    `save_snapshot` 在 `np.savez_compressed` 处抛 FileNotFoundError
+    （实测：本文件两轮续批集成 2 例失败）。
+    """
+    out = tmp_path / "sub" / "t.csv"
+    snap = tmp_path / "not_yet" / "deep" / "snap"   # 多层且不存在
+    assert not snap.exists()
+    rc = subprocess.call(
+        [PY, str(ROOT / "experiments" / "a4_verify_capacity.py"),
+         "--mode", "on", "--arm", "main", "--seed", "42", "--ticks", "300",
+         "--max-count", "300", "--snapshot-every", "100",
+         "--snapshot-dir", str(snap), "--out", str(out)],
+        cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    assert rc == 0, f"F-R13：缺快照目录时 a4 不应崩（rc={rc}）"
+    assert snap.is_dir(), "a4 必须创建 --snapshot-dir"
+    assert (snap / "t.snapshot.npz").exists(), "快照必须落盘"
+    assert out.with_suffix(".summary.json").exists()
+
+
+def test_f_r13_regression_reported_failures_are_gone(tmp_path):
+    """回归：F-R13 修复前本文件的[csv 无重复]集成 2 例失败，现须全绿。"""
+    out = tmp_path / "r.csv"
+    snap = tmp_path / "auto_snap"          # 故意不预建
+    for i in (1, 2):
+        rc = subprocess.call(
+            [PY, str(ROOT / "experiments" / "a4_verify_capacity.py"),
+             "--mode", "on", "--arm", "main", "--seed", "42",
+             "--ticks", str(200 * i), "--max-count", "300", "--log-interval", "100",
+             "--snapshot-every", "100", "--snapshot-dir", str(snap), "--out", str(out)],
+            cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        assert rc == 0
+    ticks = _ticks_of(out)
+    assert len(ticks) == len(set(ticks)) and all(b > a for a, b in zip(ticks, ticks[1:]))

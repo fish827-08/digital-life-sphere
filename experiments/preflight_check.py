@@ -117,6 +117,41 @@ def seed_sensitivity(values: list[float]) -> tuple[bool, float]:
     return sd > 1e-12, sd
 
 
+# ---- R78-3 豁免：**由配置结构决定为常数**的指标 ----
+# 2026-09-15 实跑暴露的假警报：`zero` 臂 `neutral_genes=True` **冻结 g14/g15**
+# ⇒ `g15_final` 恒 0.5 ⇒ std≡0 是**设计意图**，不是"世界种子无效"。
+# 若不豁免，任何含 zero 臂的批次都会被误拦（"仪器坏了却看不见"的反面：
+# **仪器乱响，同样让人不再信任它**）。
+# 处理方式：**反转为正向自检**——该指标本就该恒定；若居然有变化 ⇒ 说明冻结没生效。
+STRUCTURALLY_CONSTANT: dict[str, set[str]] = {
+    "zero": {"g15_final", "g14_final"},   # zero=冻结感知/信号基因，g14/g15 恒定
+}
+
+
+def is_structurally_constant(arm: str, metric: str) -> bool:
+    """该 (臂, 指标) 是否**按配置**应恒定（⇒ std≡0 不是失败，而是预期）。"""
+    return metric in STRUCTURALLY_CONSTANT.get(arm, set())
+
+
+def seed_sensitivity_verdict(
+    arm: str, metric: str, values: list[float]
+) -> tuple[bool, bool, float, list[str]]:
+    """R78-3 判定（含结构性恒定豁免）。→ (通过, 是否豁免, std, 失败说明列表)。"""
+    ok, sd = seed_sensitivity(values)
+    if is_structurally_constant(arm, metric):
+        # 注意 `seed_sensitivity` 的 ok 语义是"**有**变化"（std>0 ⇒ 通过 R78-3）。
+        # 结构性恒定指标要的恰恰相反：**必须没有变化**。
+        if ok:
+            return False, True, sd, [
+                f"R78-3 {arm}/{metric}: 该指标**应按配置恒定**（冻结 g14/g15），"
+                f"实测 std={sd:.3e} ⇒ **冻结未生效**"
+            ]
+        return True, True, sd, []
+    if not ok:
+        return False, False, sd, [f"R78-3 {arm}/{metric}: std={sd:.3e}（≡0 ⇒ 拒判）"]
+    return True, False, sd, []
+
+
 def readback_problems(arm: str, switches: dict) -> list[str]:
     """开关读回核对（R61-C4）：summary.switches 是否与臂语义一致。"""
     exp = EXPECTED_SWITCHES.get(arm)
@@ -375,12 +410,18 @@ def main() -> int:
         for metric, vals in (("g15_final", g15_vals), ("N_final", n_vals)):
             if len(vals) < 2:
                 continue
-            ok, sd = seed_sensitivity(vals)
-            if not ok:
-                failures.append(f"R78-3 {arm}/{metric}: std={sd:.3e}（≡0 ⇒ 拒判）")
-            print(f"  {'✅' if ok else '❌'} {arm} {metric}: {[round(v, 4) for v in vals]} std={sd:.4g}")
+            ok, exempt, sd, msgs = seed_sensitivity_verdict(arm, metric, vals)
+            failures.extend(msgs)
+            if exempt:
+                tag = "➖" if ok else "❌"
+                note = "结构性恒定（按设计；变化才算错）"
+            else:
+                tag = "✅" if ok else "❌"
+                note = "✅" if ok else "❌ 拒判"
+            print(f"  {tag} {arm} {metric}: {[round(v, 4) for v in vals]} "
+                  f"std={sd:.4g}{'  ' + note if exempt else ''}")
             report.append(f"| {arm} | {metric} | {[round(v, 4) for v in vals]} | {sd:.4g} "
-                          f"| {'✅' if ok else '❌ 拒判'} |")
+                          f"| {note} |")
 
     # ---- C4'：臂漂移守卫（runner 新增臂而期望表未同步 ⇒ 失败；F-R9 同型防线）----
     runner_src = (ROOT / "experiments" / "batch_runner.py")
