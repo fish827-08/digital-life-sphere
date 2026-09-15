@@ -1417,7 +1417,11 @@ class SphereEngine:
         )
         if cnt:
             self._diag_applied += int(cnt)
-            self._oracle_gain[self._id[s_kept]] += g_kept
+            # F-R16：必须用 `np.add.at` —— `arr[ids] += vals` 是"缓冲赋值"
+            # （`arr[ids] = arr[ids] + vals`），**重复索引时只保留最后一个** ⇒
+            # 同一发送者同 tick 多笔转移会**少记回馈** ⇒ budget 虚高 ⇒ 突破 C-9 封顶。
+            # [实测] `a[[1,1]] += [1,2]` ⇒ [0,2,0]（非 [0,3,0]）。
+            np.add.at(self._oracle_gain, self._id[s_kept], g_kept)
             self._oracle_transfers += total
             self._oracle_count += cnt
 

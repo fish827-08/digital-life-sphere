@@ -225,3 +225,119 @@ def test_oracle_config_dict_fallback():
     # fingerprint 含 oracle（批次自证是否开了 oracle —— 规格 §七.4）
     assert "oracle" in SimConfig(seed=1).fingerprint()
     assert EMISSION_COST == 0.1
+
+
+# ---------------- F-R16（2026-09-15）：C-9 封顶被突破的修复回归 ----------------
+
+def test_f_r16_apply_oracle_deducts_budget_sequentially():
+    """🔴 F-R16：同一发送者同 tick 多笔转移必须**顺序扣减额度**。
+
+    原实现每个 (s,r) 对都用配对时的 `budget` 快照 ⇒ 同一发送者可获**多次满额**：
+    `[实测]` budget=0.06、donation=0.05、同一发送者 2 笔 ⇒ 实付 **0.10 > 0.06**（超额 67%）
+    ⇒ 突破 C-9 保本封顶 ⇒ 端到端 `ratio` 越过 1.0。
+    """
+    energy = np.array([10.0, 0.0, 0.0])
+    total, cnt, _, _ = apply_oracle(
+        energy=energy,
+        receiver_slots=np.array([1, 2], dtype=np.int64),
+        sender_slots=np.array([0, 0], dtype=np.int64),
+        budget=np.array([0.06, 0.06], dtype=np.float64),
+        donation=0.05,
+    )
+    assert total <= 0.06 + 1e-12, f"C-9 被突破：实付 {total} > 额度 0.06"
+    assert cnt == 2                       # 第二笔为部分支付（0.01）
+    assert abs(energy.sum() - 10.0) < 1e-9
+
+
+def test_f_r16_apply_oracle_skips_when_budget_exhausted():
+    """额度被第一笔吃满 ⇒ 第二笔必须**跳过**（不是再付一次满额）。"""
+    energy = np.array([10.0, 0.0, 0.0])
+    total, cnt, _, _ = apply_oracle(
+        energy=energy,
+        receiver_slots=np.array([1, 2], dtype=np.int64),
+        sender_slots=np.array([0, 0], dtype=np.int64),
+        budget=np.array([1.0, 1.0], dtype=np.float64),
+        donation=1.0,                      # 第一笔即吃满额度
+    )
+    assert cnt == 1 and abs(total - 1.0) < 1e-12
+
+
+def test_f_r16_oracle_return_ratio_never_exceeds_one():
+    """🔴 端到端回归（O-7 设计不变量 `ratio ≤ 1`）。
+
+    前置：F-R16 修复前，D-27 剂量批 `dose1.0_s42` 实测 **ratio = 1.0163 > 1**
+    （numpy 重复索引缓冲赋值少记回馈 + 额度未顺序扣减）。
+    """
+    cfg = SimConfig(seed=42)
+    cfg.simulation.use_sim_core = False
+    cfg.population.max_count = 600
+    cfg.info_structure = InfoStructureConfig(enabled=True, learning_rate=0.05)
+    cfg.oracle.enabled = True
+    cfg.oracle.donation = 5.0              # 高剂量 ⇒ 额度迅速绑紧，最易暴露超额
+    e = SphereEngine(cfg)
+    for _ in range(400):
+        if e.extinct:
+            break
+        e.step()
+    s = e.oracle_stats()
+    assert s["oracle_return_ratio"] <= 1.0 + 1e-9, (
+        f"O-7 不变量被突破：ratio={s['oracle_return_ratio']}"
+    )
+
+
+# ---------------- F-R16（2026-09-15）：C-9 封顶被突破的修复回归 ----------------
+
+def test_f_r16_apply_oracle_deducts_budget_sequentially():
+    """🔴 F-R16：同一发送者同 tick 多笔转移必须**顺序扣减额度**。
+
+    原实现每个 (s,r) 对都用配对时的 `budget` 快照 ⇒ 同一发送者可获**多次满额**：
+    `[实测]` budget=0.06、donation=0.05、同一发送者 2 笔 ⇒ 实付 **0.10 > 0.06**（超额 67%）
+    ⇒ 突破 C-9 保本封顶 ⇒ 端到端 `ratio` 越过 1.0。
+    """
+    energy = np.array([10.0, 0.0, 0.0])
+    total, cnt, _, _ = apply_oracle(
+        energy=energy,
+        receiver_slots=np.array([1, 2], dtype=np.int64),
+        sender_slots=np.array([0, 0], dtype=np.int64),
+        budget=np.array([0.06, 0.06], dtype=np.float64),
+        donation=0.05,
+    )
+    assert total <= 0.06 + 1e-12, f"C-9 被突破：实付 {total} > 额度 0.06"
+    assert cnt == 2                       # 第二笔为部分支付（0.01）
+    assert abs(energy.sum() - 10.0) < 1e-9
+
+
+def test_f_r16_apply_oracle_skips_when_budget_exhausted():
+    """额度被第一笔吃满 ⇒ 第二笔必须**跳过**（不是再付一次满额）。"""
+    energy = np.array([10.0, 0.0, 0.0])
+    total, cnt, _, _ = apply_oracle(
+        energy=energy,
+        receiver_slots=np.array([1, 2], dtype=np.int64),
+        sender_slots=np.array([0, 0], dtype=np.int64),
+        budget=np.array([1.0, 1.0], dtype=np.float64),
+        donation=1.0,                      # 第一笔即吃满额度
+    )
+    assert cnt == 1 and abs(total - 1.0) < 1e-12
+
+
+def test_f_r16_oracle_return_ratio_never_exceeds_one():
+    """🔴 端到端回归（O-7 设计不变量 `ratio ≤ 1`）。
+
+    前置：F-R16 修复前，D-27 剂量批 `dose1.0_s42` 实测 **ratio = 1.0163 > 1**
+    （numpy 重复索引缓冲赋值少记回馈 + 额度未顺序扣减）。
+    """
+    cfg = SimConfig(seed=42)
+    cfg.simulation.use_sim_core = False
+    cfg.population.max_count = 600
+    cfg.info_structure = InfoStructureConfig(enabled=True, learning_rate=0.05)
+    cfg.oracle.enabled = True
+    cfg.oracle.donation = 5.0              # 高剂量 ⇒ 额度迅速绑紧，最易暴露超额
+    e = SphereEngine(cfg)
+    for _ in range(400):
+        if e.extinct:
+            break
+        e.step()
+    s = e.oracle_stats()
+    assert s["oracle_return_ratio"] <= 1.0 + 1e-9, (
+        f"O-7 不变量被突破：ratio={s['oracle_return_ratio']}"
+    )

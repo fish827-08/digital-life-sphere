@@ -74,21 +74,35 @@ def apply_oracle(
 
     不变量：Σenergy 守恒（浮点容差内）；零 RNG；`energy[s]` 不为负；
     同一发送者对多接收者顺序扣减（确定性：接收者数组顺序）。
+
+    ⚠️ **F-R16 修复（2026-09-15）**：原实现**没有**真的顺序扣减——每个 (s,r) 对都用
+    配对时算好的同一个 `budget` 快照 ⇒ 同一发送者在同一 tick 内可获 **多次满额** 转移
+    （实测：budget=0.06、donation=0.05、同一发送者 2 次 ⇒ 实付 0.10 > 0.06），
+    **突破 C-9 保本封顶** ⇒ `oracle_return_ratio` 实测越过 1.0（`dose1.0_s42` = 1.0163），
+    破坏 O-7"ratio ≤ 1"设计不变量。现改为**按发送者维护剩余额度、逐笔扣减**。
     """
     total = 0.0
     kept_s: list[int] = []
     kept_g: list[float] = []
     n = 0
+    # F-R16：每发送者的**剩余额度**（首次出现时以配对 budget 为初始值，之后逐笔扣减）
+    remaining: dict[int, float] = {}
     for s, r, b in zip(
         sender_slots.tolist(), receiver_slots.tolist(), budget.tolist()
     ):
-        if s < 0 or r < 0 or b <= 0:
+        if s < 0 or r < 0:
             continue
-        g = min(float(donation), float(b), float(energy[s]))
+        if s not in remaining:
+            remaining[s] = float(b)
+        rem = remaining[s]
+        if rem <= 0:
+            continue
+        g = min(float(donation), float(rem), float(energy[s]))
         if g <= 0:
             continue
         energy[s] -= g
         energy[r] += g
+        remaining[s] = rem - g
         total += g
         kept_s.append(int(s))
         kept_g.append(float(g))
