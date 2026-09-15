@@ -458,6 +458,8 @@ gitee 私有仓库  little-fishy/digital-life-sphere
 - 新文件：先 `git add <文件>` 再 `git commit -- <文件>`
 - 提交信息用约定式前缀：`feat:` `fix:` `docs:` `data:` `share:` `chore:` `refactor:` `test:`
 - ❌ **禁止 force-push 共享分支**（`main`）；确需强推时用 `--force-with-lease`
+- **并发编辑（2026-09-16 增订）**：同一 `_share/` 文件存在多线并发编辑时，提交前须 `git diff <文件>` 确认**待提交差异只含自己的行**；若含他人在途内容 ⇒ **先暂缓并板上知会**
+- **提交后核对（2026-09-16 增订）**：路径限定提交后须 `git show --stat` 核对**文件数与路径**（防静默漏提）
 
 ### 10.6 复杂 git 操作必停确认（2026-09-12 事故后增订）
 
