@@ -168,6 +168,29 @@ def test_c5_waiver_allows_declared_sub_breakeven():
         {"oracle_enabled": True, "donation": 0.05, "allow_non_breakeven": True}) == []
 
 
+# ---------------------------------------------------------------- C5 自身静默失效回归
+# 🔴 2026-09-15 实跑验收抓到的**本函数自己的**静默失效（正是本工具要防的错型）：
+#    `summary.switches` 的键名是 **`oracle_donation`**（带前缀），不是 `donation`。
+#    原实现 `if d is None: return []` ⇒ 对 D-24 的 oracle 三臂**静默报 ✅**（本该报"保本不可达"）。
+#    以下两条把这个错型钉死。
+
+def test_c5_reads_prefixed_key_from_real_switches():
+    """必须能读 `oracle_donation`（真接口键名），否则 C5 对真实产物静默失效。"""
+    sw = {"oracle_enabled": True, "oracle_donation": 0.05}
+    probs = pf.spec_consistency_problems(sw)
+    assert probs, "读不到 oracle_donation ⇒ C5 静默通过（历史真实事故）"
+    assert "保本" in probs[0]
+    # 无前缀的旧写法也要兼容（防某一侧改了键名）
+    assert pf.spec_consistency_problems({"oracle_enabled": True, "donation": 0.05})
+
+
+def test_c5_does_not_silently_pass_when_donation_unreadable():
+    """启用 oracle 却读不到 donation ⇒ 必须**报违规**（"读不到" ≠ "值合法"）。"""
+    probs = pf.spec_consistency_problems({"oracle_enabled": True})
+    assert probs, "启用 oracle 但 donation 缺失 ⇒ 不得静默通过"
+    assert any("读不到" in p for p in probs)
+
+
 def test_c5_signal_cost_matches_engine():
     """🔴 C5 的核心前提：preflight 的 SIGNAL_COST 必须与引擎真源一致。
 

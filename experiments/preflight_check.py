@@ -163,15 +163,23 @@ def spec_consistency_problems(switches: dict, *, tolerance: float = _C5_TOL) -> 
        **不硬拦**——因为 R86 的剂量点 `1.0` 本身要跑（它正是用来定位真实保本点的）。
     """
     probs: list[str] = []
-    d = switches.get("donation")
+    # ⚠️ 2026-09-15 实跑验收时抓到的**本函数自己的静默失效**（正是本工具要防的错型）：
+    #    `summary.switches` 里的键名是 **`oracle_donation`**（带前缀），不是 `donation`。
+    #    原实现 `if d is None: return []` ⇒ 对 D-24 的 oracle 三臂**静默报 ✅**（本该报"保本不可达"）！
+    #    ⇒ 两处修正：(a) 兼容带/不带前缀两种键名；(b) **启用 oracle 却读不到 donation ⇒ 报违规**
+    #    （**不允许静默通过**——"读不到"与"值合法"必须区分）。
+    enabled = bool(switches.get("oracle_enabled"))
+    d = switches.get("oracle_donation", switches.get("donation"))
     if d is None:
+        if enabled:
+            return ["oracle 已启用，但 switches 里读不到 donation（键名应为 `oracle_donation`）"
+                    "⇒ 无法验证保本自洽 ⇒ 按**不可信**处理（C5 不允许静默通过）"]
         return probs                      # 非 oracle 批不带此开关 ⇒ 无从检查
     try:
         d = float(d)
     except (TypeError, ValueError):
-        return [f"donation 不是数值：{switches.get('donation')!r}"]
+        return [f"donation 不是数值：{d!r}"]
 
-    enabled = bool(switches.get("oracle_enabled"))
     waived = bool(switches.get("allow_non_breakeven"))
     if d < 0:
         probs.append(f"donation={d} 为负（C-3 要求非负）")
@@ -243,7 +251,16 @@ def run_matrix(arms: list[str], seeds: list[int], ticks: int, max_count: int,
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Pre-Flight 检查（R61 + R78-3）")
+    # ⚠️ 2026-09-15 实跑发现：Windows 默认 GBK 控制台下 print("✅"/"❌") 会抛
+    #    UnicodeEncodeError ⇒ **检查工具自己崩掉**，扫描行（含 C5 结论）一条都打不出来
+    #    —— 即"仪器坏了却看不见"，正是本工具要防的错型。故入口强制 UTF-8。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # 非 TTY / 旧解释器：降级为不重配（不因诊断能力缺失而阻断检查）
+
+    ap = argparse.ArgumentParser(description="Pre-Flight 检查（R61 + R78-3 + C5）")
     ap.add_argument("--arms", default="main,control")
     ap.add_argument("--seeds", default="42,43,44")
     ap.add_argument("--ticks", type=int, default=3000,
