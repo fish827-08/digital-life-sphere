@@ -20,6 +20,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from language_analysis import load_snapshot  # noqa: E402
 
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
+
 def analyze_snapshot_full(snap: dict, rows: int = 60, cols: int = 120) -> dict:
     """完整分析一个快照，返回所有7维指标 + meta。"""
     metrics = {}

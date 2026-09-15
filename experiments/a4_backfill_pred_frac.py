@@ -38,6 +38,14 @@ sys.path.insert(0, str(ROOT))
 
 from observatory.statistics import predation_fraction  # noqa: E402  单一口径实现
 
+
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
 # R38③ 分层阈值：<0.9 = 非捕食主导（多为饱和封顶区制）；>=0.9 = 捕食主导
 PRED_DOMINANT = 0.9
 
