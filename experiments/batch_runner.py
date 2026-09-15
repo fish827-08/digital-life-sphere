@@ -231,6 +231,27 @@ PRESETS = {
                "snapshot-every=0"],
         template="_rerun_logs/d27_recv/dose{donation}_s{seed}.csv",
     ),
+    # R97 ⑤ **配对校准批**（R105 判据：R2 形态 + n=6）。
+    # 设计：m ∈ {1.0（配对基线）, 1.3, 1.5} × seed ∈ {42..47} = **18 run**；
+    #   全部登记 `--calibration-arm`（含 m=1.0 基线）⇒ **整批被 R100 条件 5 排除于科学判定**。
+    #   donation 固定 1.0（R91 建议）、tick 固定 8000（与 ④ 批可比）。
+    "r97cal": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["gain_multiplier=1.0,1.3,1.5", "seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=oracle", "donation=1.0", "ticks=8000",
+               "max-count=3240", "snapshot-every=0", "calibration-arm"],
+        template="_rerun_logs/r97cal/m{gain_multiplier}_s{seed}.csv",
+    ),
+    # R100 条件 7 **随机信号自检**：同档 m=1.3 + `signal_mode=random`（信号与个体状态无关 ⇒ 无信息）
+    # ⇒ 若 ratio/ρ 同样上升 = 实证「增益不依赖信号内容」（V-1 C-4 的可执行检验）。6 run。
+    "r97cal_rand": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=oracle", "donation=1.0", "ticks=8000",
+               "max-count=3240", "snapshot-every=0", "calibration-arm",
+               "gain-multiplier=1.3", "signal-mode=random"],
+        template="_rerun_logs/r97cal/rand_m1.3_s{seed}.csv",
+    ),
 }
 
 

@@ -241,6 +241,10 @@ class CultureConfig:
 #    改动它 ⇒ 必须同时复核 `OracleConfig` 的保本断言与所有历史批的可比性。
 SIGNAL_COST: float = 0.1
 
+# R97 增益校准档的 `m` 合法区间（R100 条件 5 / v1.1 §五 C5 v2）。
+# 同 SIGNAL_COST：**模块级唯一常量**，引擎/preflight/判读脚本一律引用，不得写字面量。
+CALIBRATION_M_RANGE: tuple[float, float] = (1.2, 1.5)
+
 
 @dataclass
 class InfoStructureConfig:
@@ -324,10 +328,41 @@ class OracleConfig:
     #    若断言可被字段压制，就只能靠"在 from_dict 里偷偷改写值"来兼容 ⇒ 破坏"载入=原样"契约。
     #    ⇒ 分工：**硬断言**保证"跑不起来不自洽的配置"；**pre-flight** 读回该字段决定是否**放行**。
     allow_non_breakeven: bool = False
+    # ---- R97 增益校准档（2026-09-16 实施；R100 条件 1–7 / R102 更正 / R103 命名 / R105 判据）----
+    # 唯一变更点：把**每发送者的终身额度上限**由 `1×` 抬到 `m×`：
+    #     budget = m × EMISSION_COST × emit_count − oracle_gain
+    # 默认 1.0 ⇒ **与现状逐位兼容**（旧快照缺该键 ⇒ 回退默认，同 reputation_weight 先例）。
+    # ⚠️ **C-2 守恒恒成立**（R102 §三 二阶更正 + 内评 §二 会签）：抬 `m` 只放宽"发送者**能收多少**"
+    #    的上限，每笔转移仍是「扣减 == 入账」⇒ 纯再分配、**不生成能量** ⇒ 无需任何例外声明。
+    #    发送者的"净收益"由**接收者支付**承担 ⇒ 接收侧代价必须随 `ratio` 一并报告（v1.1 §4.3）。
+    gain_multiplier: float = 1.0
+    # 校准臂登记（R100 条件 5「机器强制拒收」+ R103 §二.2）。
+    # 未登记而 `m ≠ 1` ⇒ **硬失败**；标了旗而 `m == 1` 亦报错（m=1 属科学臂，防登记口径漂移）。
+    is_calibration_arm: bool = False
 
     def __post_init__(self) -> None:
         assert self.donation >= 0, "donation 非负"
         assert self.persistence >= 0, "persistence 非负"
+        assert self.gain_multiplier >= 1.0, (
+            f"gain_multiplier({self.gain_multiplier}) 不得 < 1.0：增益档只**放宽上限**，不收紧"
+        )
+        # ---- C5 v2 规格自洽（增益档版；2026-09-16）----
+        # 三态：① 科学臂（m=1）保持原语义；② 校准臂（m>1）必须登记且 m 落在区间内；
+        #      ③ 未登记而 m≠1 / 标旗而 m=1 ⇒ 一律硬失败（防"校准档静默混入科学判读"）。
+        if self.is_calibration_arm:
+            lo, hi = CALIBRATION_M_RANGE
+            # 校准臂的两类：**处理臂** m ∈ [1.2, 1.5]（R100 条件 5 区间）；
+            # **配对基线** m == 1.0（增益档关闭的对照，仍须登记 ⇒ 同样被条件 5 拒收于科学判读）。
+            # 只有这两类合法；其余（如 m=1.1 或 m>1.5）一律失败。
+            assert self.gain_multiplier == 1.0 or lo <= self.gain_multiplier <= hi, (
+                f"C5 v2 失败：校准臂 gain_multiplier({self.gain_multiplier}) 只允许 "
+                f"1.0（配对基线）或落在 [{lo}, {hi}]（处理臂）⇒ 其余一律失败"
+            )
+        else:
+            assert self.gain_multiplier == 1.0, (
+                f"C5 v2 失败：gain_multiplier({self.gain_multiplier}) ≠ 1.0 但**未登记为校准臂** "
+                f"⇒ 硬失败（R100 条件 5；若确为校准档，须显式设 is_calibration_arm=True）"
+            )
         # ---- C5 规格自洽（2026-09-15 立；事故原型 = D-24 的 G-A 不过） ----
         # V-1 曾把 donation 定为 0.05 而 SIGNAL_COST 是 0.1 ⇒ 结构性上限 = 0.05/0.1 = 0.5 < 1.0
         # ⇒ "保本"语义**在数学上不可达**，oracle 必然检出不了阳性（G-A 必不过）。

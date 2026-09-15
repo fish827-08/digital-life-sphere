@@ -42,7 +42,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from simulation.config import InfoStructureConfig, SimConfig  # noqa: E402
+from simulation.config import CALIBRATION_M_RANGE, InfoStructureConfig, SimConfig  # noqa: E402
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
 
@@ -58,7 +58,10 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           max_count: int = 5000, neutral: bool = False,
           sig_disabled: bool = False, oracle: bool = False,
           measure: bool = False, oracle_donation: float | None = None,
-          oracle_persistence: int | None = None) -> SphereEngine:
+          oracle_persistence: int | None = None,
+          gain_multiplier: float | None = None,
+          calibration_arm: bool = False,
+          signal_mode: str | None = None) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -85,6 +88,29 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         c.oracle.donation = float(oracle_donation)
     if oracle_persistence is not None:
         c.oracle.persistence = int(oracle_persistence)
+    # R97 增益校准档（2026-09-16）：**先登记旗、再设 m**，并在此显式做 C5 v2 自洽检查
+    # （dataclass 构造后赋值不触发 __post_init__ ⇒ 不能只依赖它；F1 教训同型）。
+    if calibration_arm:
+        c.oracle.is_calibration_arm = True
+    if gain_multiplier is not None:
+        c.oracle.gain_multiplier = float(gain_multiplier)
+    if c.oracle.gain_multiplier != 1.0 and not c.oracle.is_calibration_arm:
+        raise SystemExit(
+            f"C5 v2 硬失败：gain_multiplier={c.oracle.gain_multiplier} ≠ 1.0 "
+            f"但未登记校准臂（须 --calibration-arm）"
+        )
+    if c.oracle.is_calibration_arm:
+        lo, hi = CALIBRATION_M_RANGE
+        _mm = float(c.oracle.gain_multiplier)
+        if not (_mm == 1.0 or lo <= _mm <= hi):
+            raise SystemExit(
+                f"C5 v2 硬失败：校准臂 gain_multiplier={_mm} 只允许 1.0（配对基线）"
+                f"或落在 [{lo}, {hi}]（处理臂）"
+            )
+    # R100 条件 7（随机信号自检）：`signal_mode="random"` ⇒ 信号与个体状态无关（**无信息**）
+    # ⇒ 若 ratio/ρ 同样上升，即实证「增益不依赖信号内容」（V-1 C-4 的可执行检验）。
+    if signal_mode is not None:
+        c.signal_mode = str(signal_mode)
     return SphereEngine(c)
 
 
@@ -129,6 +155,18 @@ def main() -> None:
                          "`--donation` 是等性别名（供 batch_runner `--<key>` 拼参用）")
     ap.add_argument("--oracle-persistence", type=int, default=None,
                     help="覆盖 oracle.persistence（归因窗口 tick）；仅 --arm oracle 生效")
+    # R97 增益校准档（R105 放行 ④ 实施）：`m` 必须与校准臂登记成对出现（C5 v2）。
+    ap.add_argument("--gain-multiplier", "--m", dest="gain_multiplier",
+                    type=float, default=None,
+                    help="覆盖 oracle.gain_multiplier（增益档）；**仅 --arm oracle 生效**，"
+                         "且 m≠1 必须同时给 --calibration-arm")
+    ap.add_argument("--signal-mode", dest="signal_mode", default=None,
+                    choices=["state", "random", "evolved"],
+                    help="覆盖 signal_mode；`random` = 信号与个体状态无关（**无信息**）"
+                         "⇒ 供 R100 条件 7「随机信号自检」用")
+    ap.add_argument("--calibration-arm", action="store_true",
+                    help="登记本臂为**校准臂**（`is_calibration_arm=True`）；"
+                         "R100 条件 5：未登记而 m≠1 ⇒ 硬失败")
     args = ap.parse_args()
 
     arm = args.arm
@@ -182,7 +220,10 @@ def main() -> None:
                   max_count=args.max_count, neutral=neutral,
                   sig_disabled=sig_disabled, oracle=oracle_on, measure=measure,
                   oracle_donation=args.oracle_donation,
-                  oracle_persistence=args.oracle_persistence)
+                  oracle_persistence=args.oracle_persistence,
+                  gain_multiplier=args.gain_multiplier,
+                  calibration_arm=bool(args.calibration_arm),
+                  signal_mode=args.signal_mode)
         start_tick = 0
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
@@ -284,6 +325,10 @@ def main() -> None:
             "max_count": int(e.config.population.max_count),
             "neutral_genes": bool(e.config.neutral_genes),
             "signal_disabled": bool(e.config.signal_disabled),
+            # R97 增益校准档（条件 5 机器强制拒收依据 + C4 读回核对）
+            "oracle_gain_multiplier": float(e.config.oracle.gain_multiplier),
+            "is_calibration_arm": bool(e.config.oracle.is_calibration_arm),
+            "signal_mode": str(e.config.signal_mode),
         },
         "result": {
             # ⚠️ 必须用引擎真实 tick，不能用 last（=最后一次【采样】的 tick）：

@@ -66,6 +66,25 @@ MIN_EFFECT_RHO = 0.10          # 提案 d-1；阈值只在此一处（待 R94）
 ZERO_SELFCHECK_SIGMAS = 4.0    # R90-c：|ρ| ≤ 4/√(n−3)
 
 
+def exclude_calibration_arms(data: dict[str, dict]) -> tuple[dict[str, dict], list[str]]:
+    """🔒 **R100 条件 5：机器强制拒收** —— 把 `is_calibration_arm=True` 的 run 排除在**任何判定**之外。
+
+    背景：R97 增益校准档（`m > 1`）是**仪器校准**用途，其"阳性"不构成科学证据（v1.1 §七.1）。
+    若它静默混进 G-A / E-BM 的判定集，就会把"校准结果"当成"科学结论"——本函数是**机器强制**那道闸。
+
+    返回 `(过滤后的 data, 被排除的键列表)`；调用方**必须**打印被排除行数（可见性 = 可审计）。
+    缺 `is_calibration_arm` 键的旧批 ⇒ 按 False 处理（旧批确无校准臂）。
+    """
+    keep: dict[str, dict] = {}
+    dropped: list[str] = []
+    for k, v in data.items():
+        if not v.get("missing") and v.get("is_calibration_arm"):
+            dropped.append(k)
+            continue
+        keep[k] = v
+    return keep, dropped
+
+
 def _load(dirp: Path) -> dict[str, dict]:
     """读全部 summary + CSV 终局行。键 = f"{arm}_s{seed}"。"""
     out: dict[str, dict] = {}
@@ -92,6 +111,9 @@ def _load(dirp: Path) -> dict[str, dict]:
                 "resp": res.get("signal_response") or {},
                 "oracle": res.get("oracle") or {},
                 "codebook_on": bool(sw.get("arbitrary_codebook")),
+                # R97 增益校准档（R100 条件 5 依据）：校准臂必须被排除在任何判定之外
+                "is_calibration_arm": bool(sw.get("is_calibration_arm", False)),
+                "gain_multiplier": sw.get("oracle_gain_multiplier"),
             }
             # g15 终值 + codebook_conv 时序（取 CSV；列序与 runner 的 fields 一致）
             row["g15_final"] = None
@@ -127,6 +149,14 @@ def _grp(data: dict, arm: str, pick) -> list[float]:
 
 
 def judge(data: dict, dirp: Path) -> dict:
+    # 🔒 防御性双重保险（R100 条件 5）：判定入口**再断言一次**无校准臂
+    _cal = [k for k, v in data.items()
+            if not v.get("missing") and v.get("is_calibration_arm")]
+    if _cal:
+        raise RuntimeError(
+            f"R100 条件 5 违规：判定集里仍含校准臂 {_cal} ⇒ 校准档不得进科学判定"
+            "（应先经 exclude_calibration_arms 过滤）"
+        )
     gates: dict[str, dict] = {}
 
     # ---- G-A：oracle vs zero 的 ⑤/⑥（CI 不覆盖 0，方向为正）----
@@ -297,6 +327,12 @@ def main() -> int:
     if not dirp.is_absolute():
         dirp = ROOT / dirp
     data = _load(dirp)
+    data, _excluded = exclude_calibration_arms(data)
+    if _excluded:
+        print(f"🔒 R100 条件 5（机器强制拒收）：**已排除 {len(_excluded)} 个校准臂 run**"
+              f"（`is_calibration_arm=True`）：{_excluded}")
+    else:
+        print("🔒 R100 条件 5（机器强制拒收）：无校准臂 run（被排除 0 个）")
     missing = [k for k, v in data.items() if v.get("missing")]
     if missing:
         print(f"⚠️ 缺 {len(missing)} 份 summary：{missing}")

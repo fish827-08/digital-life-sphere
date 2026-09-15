@@ -71,7 +71,7 @@ COMPARE_FIELDS = ("N", "g14", "g15", "trust", "max_gen", "max_gen_cur")
 # 信号发射成本（单次发射扣费）——**从单一真源取，不再本地抄一份**（C5）。
 # 此前本文件抄了一份字面量；连同引擎两处局部字面量与 oracle.EMISSION_COST，同源值共 **4 处声明**。
 # 现统一：`simulation/config.py` 的 `SIGNAL_COST` 是唯一真源，此处只引用。
-from simulation.config import SIGNAL_COST  # noqa: E402
+from simulation.config import CALIBRATION_M_RANGE, SIGNAL_COST  # noqa: E402
 
 # 容差：C5 用浮点比较（与常见档位 0.02/0.05/0.1/0.5/0.7 相比，1e-9 足够严、又不误报）
 _C5_TOL = 1e-9
@@ -198,6 +198,44 @@ def spec_consistency_problems(switches: dict, *, tolerance: float = _C5_TOL) -> 
        **不硬拦**——因为 R86 的剂量点 `1.0` 本身要跑（它正是用来定位真实保本点的）。
     """
     probs: list[str] = []
+    # ---- C5 v2（2026-09-16，R97 增益校准档）：**三态** ----
+    # ① 科学臂（m == 1，未登记）：走下面的原检查（donation ≥ SIGNAL_COST）；
+    # ② 校准臂（m > 1 且已登记）：`m` 必须落在 CALIBRATION_M_RANGE 内，否则违规；
+    # ③ 未登记而 m ≠ 1（或标旗而 m == 1）：**口径漂移 ⇒ 违规**（防校准档静默混入科学判读）。
+    # ⚠️ 键名：新批写 `oracle_gain_multiplier` / `is_calibration_arm`；**旧批（D-24/D-27）没有该键**
+    #    ⇒ 按默认 1.0 处理并**留 advisory 注记**（不静默、也不误报为违规——旧批确未使用增益档）。
+    _cal_flag_present = "is_calibration_arm" in switches
+    is_cal = bool(switches.get("is_calibration_arm", False))
+    if "oracle_gain_multiplier" in switches:
+        try:
+            _m = float(switches["oracle_gain_multiplier"])
+        except (TypeError, ValueError):
+            probs.append(f"oracle_gain_multiplier 不是数值：{switches['oracle_gain_multiplier']!r}")
+            _m = 1.0
+    else:
+        _m = 1.0
+        # ⚠️ 此处不能用下方的 `enabled`（尚未赋值）⇒ 就地读取
+        if bool(switches.get("oracle_enabled")):
+            print("  ℹ️ C5 v2：switches 无 `oracle_gain_multiplier`（旧批，先于增益档实施）"
+                  "⇒ 按默认 m=1.0 处理（非违规）")
+    _lo, _hi = CALIBRATION_M_RANGE
+    if is_cal and _m != 1.0:
+        if not (_lo <= _m <= _hi):
+            probs.append(
+                f"**【C5 v2 超区间】**校准臂 gain_multiplier={_m} 不在 [{_lo}, {_hi}] ⇒ 失败"
+            )
+        else:
+            print(f"  ℹ️ C5 v2：**校准臂** m={_m} ∈ [{_lo}, {_hi}] ⇒ 合规；"
+                  "⚠️ 该臂**不得进入任何科学判定**（R100 条件 5 机器强制拒收）")
+    elif is_cal and _m == 1.0:
+        # 合法：校准批的**配对基线**（增益档关闭的对照）；仍被条件 5 拒收于科学判读。
+        print("  ℹ️ C5 v2：校准臂 m=1.0 = **配对基线**（增益档关闭的对照）⇒ 合规；"
+              "同样被 R100 条件 5 排除于科学判定")
+    elif not is_cal and _m != 1.0:
+        probs.append(
+            f"**【C5 v2 未登记】**gain_multiplier={_m} ≠ 1.0 但 `is_calibration_arm` 为假"
+            " ⇒ 未登记的校准档不得进科学判读（R100 条件 5）⇒ 失败"
+        )
     # ⚠️ 2026-09-15 实跑验收时抓到的**本函数自己的静默失效**（正是本工具要防的错型）：
     #    `summary.switches` 里的键名是 **`oracle_donation`**（带前缀），不是 `donation`。
     #    原实现 `if d is None: return []` ⇒ 对 D-24 的 oracle 三臂**静默报 ✅**（本该报"保本不可达"）！

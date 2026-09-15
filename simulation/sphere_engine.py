@@ -40,7 +40,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from core.lifecycle import DeathCause
-from simulation.config import SIGNAL_COST, SimConfig
+from simulation.config import CALIBRATION_M_RANGE, SIGNAL_COST, SimConfig
 from simulation.genes import Gene
 from simulation.oracle import EMISSION_COST, apply_oracle, attribution_ok
 from simulation.provenance import CountingRNG
@@ -178,6 +178,24 @@ class SphereEngine:
                     f"F1 硬失败：info_structure.perception_radius={_ifcfg.perception_radius} 不合法，"
                     f"只支持 4（Von Neumann）或 8（Moore）。"
                     f"传入其他值会被静默当作 8 处理（no-op），已禁止。"
+                )
+        # R97 增益校准档（2026-09-16）：C5 v2 三态**在引擎入口再校验一次**。
+        # 理由同 D-1（F1 教训）：dataclass 的 `__post_init__` 只在**构造时**生效，
+        # 构造后直接 `cfg.oracle.gain_multiplier = 1.3` 不会触发校验 ⇒ 校验必须落在入口。
+        _ocfg = getattr(config, "oracle", None)
+        if _ocfg is not None and _ocfg.enabled and _ocfg.gain_multiplier != 1.0:
+            if not getattr(_ocfg, "is_calibration_arm", False):
+                raise ValueError(
+                    f"C5 v2 硬失败：oracle.gain_multiplier={_ocfg.gain_multiplier} ≠ 1.0 "
+                    f"但未登记 is_calibration_arm=True ⇒ 校准档不得静默混入科学判读"
+                    f"（R100 条件 5 / v1.1 §五）。"
+                )
+            lo, hi = CALIBRATION_M_RANGE
+            _mm = float(_ocfg.gain_multiplier)
+            if not (_mm == 1.0 or lo <= _mm <= hi):
+                raise ValueError(
+                    f"C5 v2 硬失败：校准臂 gain_multiplier={_mm} 只允许 1.0（配对基线）"
+                    f"或落在 [{lo}, {hi}]（处理臂）⇒ 其余一律失败。"
                 )
         # D-19：用 CountingRNG 包一层——**随机流逐位不变**，只统计抽取次数（rng_draws），
         # 供 provenance 机械校验"两条路径/两次重跑是否消费了同一条随机流"（V-1 O-6）。
@@ -1455,12 +1473,15 @@ class SphereEngine:
         pos_c = np.minimum(pos, len(uniq) - 1)
         found = (s_ids >= 0) & (uniq[pos_c] == s_ids)
         s_slot = np.where(found, inv[pos_c], -1).astype(np.int64)
-        # C-9 保本封顶（每发送者终身）：剩余额度 = 成本×累计发射 − 已获回馈
+        # C-9 保本封顶（每发送者终身）：剩余额度 = **m ×** 成本×累计发射 − 已获回馈。
+        # `m = oracle.gain_multiplier`（默认 1.0 ⇒ 与旧行为**逐位一致**）；`m > 1` 只在
+        # **已登记的校准臂**上出现（C5 v2 入口硬校验）。⚠️ C-2 守恒恒成立（纯再分配）。
         valid = s_ids >= 0
         safe = np.where(valid, s_ids, 0)
+        _m = float(self.config.oracle.gain_multiplier)
         budget = np.where(
             valid,
-            EMISSION_COST * self._emit_count[safe].astype(np.float64)
+            _m * EMISSION_COST * self._emit_count[safe].astype(np.float64)
             - self._oracle_gain[safe].astype(np.float64),
             -1.0,
         )
@@ -1549,6 +1570,10 @@ class SphereEngine:
             "ledger": self.oracle_ledger(),
             # 内评 §三 观察项 1/2：接收侧效应（方向翻转新引入；`[推断]` → 实测量化）
             "receiver_side": self.receiver_side_effects(),
+            # R97 增益校准档（2026-09-16）：`m` 与校准臂登记 —— 供 C4 读回核对（C5 v2）
+            # 与 R100 条件 5（机器强制拒收依据 `is_calibration_arm`）。
+            "gain_multiplier": float(self.config.oracle.gain_multiplier),
+            "is_calibration_arm": bool(self.config.oracle.is_calibration_arm),
         }
 
     def oracle_ledger(self) -> dict:
