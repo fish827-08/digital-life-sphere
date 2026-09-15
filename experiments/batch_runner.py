@@ -204,6 +204,15 @@ PRESETS = {
         fixed=["mode=on", "ticks=60000", "max-count=3240", "snapshot-every=5000"],
         template="_rerun_logs/d24/{arm}_s{seed}.csv",
     ),
+    # D-27④-A（R86 修订 / R91）：oracle **剂量-响应**四点测量。
+    # 四点覆盖 ratio≥1.2 的求解区（R91 建议）；tick 固定 ⇒ 转化率可比（转化率随 run 变长而升）。
+    "d27dose": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["donation=0.674,1.0,1.5,2.0", "seed=42,43,44"],
+        fixed=["mode=on", "arm=oracle", "ticks=8000", "max-count=3240",
+               "snapshot-every=0"],
+        template="_rerun_logs/d27/dose{donation}_s{seed}.csv",
+    ),
 }
 
 
