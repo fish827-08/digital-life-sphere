@@ -261,3 +261,31 @@ def test_structurally_constant_table_covers_only_zero_genes():
     for arm in ("main", "control", "sigoff", "oracle"):
         for metric in ("g15_final", "g14_final", "N_final"):
             assert not pf.is_structurally_constant(arm, metric)
+
+
+def test_no_signal_cost_literal_anywhere_in_controlled_tree():
+    """🔴 防退化：字面量副本守卫必须覆盖**全受控目录**，不能只列两个文件名。
+
+    理由：原守卫（上一条测试）只扫 `simulation/sphere_engine.py` 与
+    `simulation/oracle.py` ⇒ **新文件（如新增 experiment 脚本）可以悄悄引入
+    `SIGNAL_COST = 0.1` 副本而不被拦** —— 这正是"检查工具自带的静默漏洞"
+    （2026-09-15 本人在写 `experiments/d27_dose_fit.py` 时**亲手撞上**：
+    第一版确实写了字面量，靠人工 grep 才发现）。
+    本测试把范围扩到受控代码目录下的全部 `.py`。
+    """
+    pat = re.compile(r"^\s*(SIGNAL_COST|EMISSION_COST)\s*=\s*[0-9.]+", re.M)
+    allow = {"simulation/config.py"}          # 唯一真源（注释：C5）
+    bad = []
+    for pkg in ("simulation", "observatory", "experiments", "world", "core"):
+        base = ROOT / pkg
+        if not base.is_dir():
+            continue
+        for p in base.rglob("*.py"):
+            rel = p.relative_to(ROOT).as_posix()
+            if rel in allow or "__pycache__" in p.parts:
+                continue
+            if pat.search(p.read_text(encoding="utf-8")):
+                bad.append(rel)
+    assert not bad, (
+        f"以下文件出现 SIGNAL_COST/EMISSION_COST 字面量副本（应 import 单一真源）：{bad}"
+    )
