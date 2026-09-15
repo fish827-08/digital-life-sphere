@@ -333,3 +333,151 @@ def max_generation_highwater(engine) -> int:
     `_eval/D24判读预析` §4.4 引用的 `max_gen`=117 属本口径。
     """
     return int(engine._max_generation)
+
+
+# ============================================================================
+# R105 / ρ v3（2026-09-16）：**⑤ 主指标的簇级合并与判据**
+# ============================================================================
+# 判定形态（R105 锁定，跑前不得改）：**合并 ρ 的种子级 95% 单侧 CI 下界 > 0**
+# 算法（内评 `_share/预注册-⑤主指标spearman_rho-v3-20260916.md` §二）：
+#   1) 逐 seed 算 ρ_i ⇒ Fisher z：z_i = atanh(ρ_i)
+#   2) 簇级（单位 = **世界种子**）：z̄ = mean(z_i)，s_z = sd(z_i, ddof=1)
+#   3) 单侧下界：L = z̄ − t_{0.95, n−1} · s_z/√n
+#   4) L > 0 ⇒ 通过；报告时反变换回 ρ 尺度
+#   5) 三条明确：(a) **检验在 z 尺度、报告在 ρ 尺度**；(b) **单侧**；
+#      (c) **n = seed 数**（个体级 n 10³–10⁵ **禁止代入**——R96 伪重复）
+# ⚠️ 设计备择 μ = ρ 0.10（z_μ = atanh(0.10) = 0.1003）——**不再是判定门槛**，只用于功效设计。
+
+_FISHER_EPS = 1e-9
+# R96 守卫：簇级函数的输入**必须是逐 seed 的值**；超过此上限 ⇒ 判为"个体级 n 被代入" ⇒ 拒绝
+_MAX_SEED_COUNT = 64
+
+
+def t_quantile(df: int, alpha: float = 0.05, n_mc: int = 2_000_000,
+               seed: int = 20260916) -> float:
+    """单侧 **t 临界值** `t_{1−α, df}` 的蒙特卡洛估计（**不引入 scipy**）。
+
+    ⚠️ `alpha` = **单侧尾部概率**（0.05 ⇒ 95% 单侧置信）⇒ 返回**正**临界值；调用方
+    传 `alpha`，**不要再传 `1 − alpha`**（2026-09-16 我首版即在调用处重复应用一次 ⇒
+    临界值变**负** ⇒ 连"全负 ρ"都会被判 pass；已加回归测试守住）。
+    分块采样（默认 2e6）⇒ 与解析值误差 <0.2%（`t_{.95,5}` 解析 2.015048）。
+    """
+    assert df >= 1, "df 至少为 1"
+    assert 0.0 < alpha < 1.0
+    rng = np.random.default_rng(seed)
+    chunk = 250_000
+    acc: list[np.ndarray] = []
+    done = 0
+    while done < n_mc:
+        k = min(chunk, n_mc - done)
+        z = rng.normal(0.0, 1.0, size=(k, df + 1))
+        m = z.mean(axis=1)
+        sd = z.std(axis=1, ddof=1)
+        acc.append(m / (sd / np.sqrt(df + 1)))
+        done += k
+    stat = np.concatenate(acc)
+    return float(np.quantile(stat, 1 - alpha))
+
+
+def _guard_seed_count(n: int) -> None:
+    """🔴 R96 守卫：**个体级 n 禁止代入簇级公式**（伪重复会严重高估显著性）。
+
+    本函数只接受**逐 seed** 的统计量（典型 n = 3–32）。传入个体级数值（10³–10⁵）时
+    必须**显式报错**，而不是给出一个"看起来更显著"的结果——
+    这正是 D-24 实例（个体级 p≈0 vs 种子级 p=0.199）踩过的坑。
+    """
+    if n > _MAX_SEED_COUNT:
+        raise ValueError(
+            f"R96 违规：簇级合并收到 {n} 个值，超过 seed 数上限 {_MAX_SEED_COUNT} "
+            f"⇒ 疑似把**个体级 n** 代入了公式（伪重复）。请传逐 seed 的统计量。"
+        )
+
+
+def fisher_z(rho: float) -> float:
+    """ρ → Fisher z（对 ±1 做裁剪，避免 atanh 发散）。"""
+    r = float(np.clip(rho, -1.0 + _FISHER_EPS, 1.0 - _FISHER_EPS))
+    return float(np.arctanh(r))
+
+
+def inv_fisher_z(z: float) -> float:
+    """Fisher z → ρ（报告用；检验仍在 z 尺度）。"""
+    return float(np.tanh(z))
+
+
+def merge_rho_cluster(rhos, *, alpha: float = 0.05, t_crit: float | None = None) -> dict:
+    """**单臂**簇级合并 ρ + 单侧 CI 下界（R105 判据本体）。
+
+    `rhos` = 逐 **seed** 的 ρ 列表（**不得**传个体级数值 —— 个体级 n 禁止代入公式，R96）。
+    返回 `rho_by_seed` / `z_by_seed` / `zbar` / `s_z` / `ci_low_z` / `ci_low_rho` /
+    `n_seeds` / `pass`（= `ci_low_z > 0`）/ `t_crit` / `alpha` / `scale`（口径说明）。
+    """
+    xs = [float(r) for r in rhos if r is not None]
+    n = len(xs)
+    _guard_seed_count(n)
+    out = {
+        "rho_by_seed": [round(v, 6) for v in xs],
+        "n_seeds": n,
+        "alpha": alpha,
+        "scale": "检验在 z 尺度、报告在 ρ 尺度；n = seed 数（个体级 n 禁止代入）",
+        "pass": False,
+    }
+    if n < 2:
+        out.update({"z_by_seed": [], "zbar": None, "s_z": None,
+                    "ci_low_z": None, "ci_low_rho": None,
+                    "t_crit": None, "note": "seed 数 <2 ⇒ 无法估簇级离散 ⇒ 不判"})
+        return out
+    zs = [fisher_z(v) for v in xs]
+    zbar = float(np.mean(zs))
+    s_z = float(np.std(zs, ddof=1))
+    tc = float(t_crit) if t_crit is not None else t_quantile(n - 1, alpha)
+    ci_low_z = zbar - tc * s_z / np.sqrt(n)
+    out.update({
+        "z_by_seed": [round(v, 6) for v in zs],
+        "zbar": round(zbar, 6),
+        "s_z": round(s_z, 6),
+        "t_crit": round(tc, 6),
+        "ci_low_z": round(ci_low_z, 6),
+        "ci_low_rho": round(inv_fisher_z(ci_low_z), 6),
+        "pass": bool(ci_low_z > 0),
+    })
+    return out
+
+
+def merge_rho_cluster_paired(rhos_a, rhos_b, *, alpha: float = 0.05,
+                             t_crit: float | None = None) -> dict:
+    """**配对**簇级比较（A 臂 vs B 臂，**同 seed 配对**；R100 条件 6「各 seed 内配对」）。
+
+    d_i = z_i^A − z_i^B；L = d̄ − t_{0.95, n−1} · s_d/√n；L > 0 ⇒ A 显著高于 B。
+    用于 D-24 式 **G-A 的 ⑤ 支路**（oracle vs zero）——比旧的"两组各自 bootstrap 再比中位差"
+    更贴合 R105 的簇级口径（**单位 = seed**，n = 配对 seed 数）。
+    """
+    pairs = [(float(a), float(b)) for a, b in zip(rhos_a, rhos_b)
+             if a is not None and b is not None]
+    n = len(pairs)
+    _guard_seed_count(n)
+    out = {
+        "paired_by_seed": [[round(a, 6), round(b, 6)] for a, b in pairs],
+        "n_seeds": n,
+        "alpha": alpha,
+        "scale": "z 尺度配对差、单侧 t；n = 配对 seed 数",
+        "pass": False,
+    }
+    if n < 2:
+        out.update({"dbar": None, "s_d": None, "ci_low_z": None,
+                    "ci_low_rho": None, "t_crit": None,
+                    "note": "配对 seed <2 ⇒ 不判"})
+        return out
+    ds = [fisher_z(a) - fisher_z(b) for a, b in pairs]
+    dbar = float(np.mean(ds))
+    s_d = float(np.std(ds, ddof=1))
+    tc = float(t_crit) if t_crit is not None else t_quantile(n - 1, alpha)
+    ci_low_z = dbar - tc * s_d / np.sqrt(n)
+    out.update({
+        "dbar": round(dbar, 6),
+        "s_d": round(s_d, 6),
+        "t_crit": round(tc, 6),
+        "ci_low_z": round(ci_low_z, 6),
+        "ci_low_rho": round(inv_fisher_z(ci_low_z), 6),
+        "pass": bool(ci_low_z > 0),
+    })
+    return out

@@ -33,6 +33,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from observatory.statistics import t_quantile  # noqa: E402  R105：t 临界值单一真源
+
 # --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败）---
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -122,13 +124,12 @@ def power_ci_zero(n: int, mu: float, sd: float, alpha: float = 0.05,
     return float(np.mean(samples - z * se > 0))
 
 
-def _t_crit(df: int, alpha: float = 0.05, n_mc: int = 400_000) -> float:
-    """单尾 t 临界值的**蒙特卡洛**估计（不依赖 scipy；df 下的 t_{1−α}）。"""
-    z = RNG.normal(0.0, 1.0, size=(n_mc, df + 1))
-    m = z.mean(axis=1)
-    s = z.std(axis=1, ddof=1)
-    stat = m / (s / np.sqrt(df + 1))
-    return float(np.quantile(stat, 1 - alpha))
+def _t_crit(df: int, alpha: float = 0.05) -> float:
+    """单尾 t 临界值 —— **委托** `observatory.statistics.t_quantile`（单一真源，2026-09-16 归一）。
+
+    归一理由：R105/ρ v3 的簇级 CI 用同一个临界值；两处各写一份 ⇒ 迟早漂移（本项目已付学费）。
+    """
+    return t_quantile(df, alpha)
 
 
 def power_ci_t(n: int, mu: float, sd: float, alpha: float = 0.05,

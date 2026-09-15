@@ -35,7 +35,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from observatory.inference import compare_groups  # noqa: E402  D-7 工具（G-F/G-A）
+from observatory.inference import compare_groups
+from observatory.statistics import (  # R105/ρ v3：簇级合并（单位 = seed）
+    merge_rho_cluster, merge_rho_cluster_paired,
+)  # noqa: E402  D-7 工具（G-F/G-A）
 
 
 # --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
@@ -148,6 +151,24 @@ def _grp(data: dict, arm: str, pick) -> list[float]:
     return vals
 
 
+def _paired_by_seed(data: dict, arm_a: str, arm_b: str, pick) -> tuple[list, list]:
+    """按 **seed 显式配对**取值（只保留两臂都有的 seed）——R100 条件 6「各 seed 内配对」。
+
+    ⚠️ 不能拿 `_grp(a)` 与 `_grp(b)` 的结果按下标配对：`_grp` 各自跳过缺失项，
+    两条列表的 seed 可能不同 ⇒ 配对错位（**静默**且会污染 t 检验）。
+    """
+    va, vb = [], []
+    for seed in SEEDS:
+        ra, rb = data.get(f"{arm_a}_s{seed}", {}), data.get(f"{arm_b}_s{seed}", {})
+        if ra.get("missing") or rb.get("missing"):
+            continue
+        x, y = pick(ra), pick(rb)
+        if x is None or y is None:
+            continue
+        va.append(float(x)); vb.append(float(y))
+    return va, vb
+
+
 def judge(data: dict, dirp: Path) -> dict:
     # 🔒 防御性双重保险（R100 条件 5）：判定入口**再断言一次**无校准臂
     _cal = [k for k, v in data.items()
@@ -191,6 +212,13 @@ def judge(data: dict, dirp: Path) -> dict:
                     "提案 d-1（待 R94 裁定）：|ρ|≥0.10 才可作为阳性证据（ρ²≈0.01）"
                 )
                 ok = ok and detail["effect_size_ok"]
+                # 🔴 R105 / ρ v3：⑤ 主判据改读**簇级配对**形态（Fisher z + 单侧 t；单位 = seed）。
+                # 上面那组 bootstrap CI 降为**同报参考**（口径不同：那是以 seed 值为样本的置换检验）。
+                va, vb = _paired_by_seed(data, "oracle", "zero", pick)
+                cp = merge_rho_cluster_paired(va, vb)
+                detail["cluster_paired_R105"] = cp
+                detail["cluster_paired_is_primary"] = True
+                ok = bool(cp["pass"])
                 # R90-a：辅助列同报（且**不得**单独引用于门判定）
                 detail[AUX_METRIC_NOTE] = [
                     round(v, 6) for v in _grp(
@@ -260,9 +288,13 @@ def judge(data: dict, dirp: Path) -> dict:
     ols_d = {s: (data.get(f"main_s{s}", {}).get("sel", {}).get("non_sat") or {}).get(AUX_SEL_METRIC)
              for s in SEEDS}
     readable = [v for v in rho_d.values() if v is not None]
+    # 🔴 R105/ρ v3：同报主臂**簇级合并**（z̄/s_z/CI 下界）；G-D 仍为**在位性门**
+    # ⇒ 只查"可算"，**不查方向**（R87-1；方向由 G-A / 校准批负责）。
+    cluster_main = merge_rho_cluster([v for v in rho_d.values() if v is not None])
     gates["G-D"] = {
         "pass": bool(len(readable) >= 2),
-        "detail": {"main_非饱和窗ρ(R85主)": rho_d,
+        "detail": {"cluster_R105": cluster_main,
+                   "main_非饱和窗ρ(R85主)": rho_d,
                    AUX_METRIC_NOTE: ols_d,
                    "注": "在位性门（R87-1 分级表述）；个体层选择梯度 ≠ 群体均值会涨（V-7 附注）"},
     }
