@@ -292,6 +292,11 @@ def main() -> None:
             "final_tick": int(e._tick), "final_N": len(e._id), "extinct": bool(e.extinct),
             "reached_60k": reached, "stable_N_gt0_last50k": stable50k,
             "eco_gate_pass": bool(reached and stable50k),
+            # ---- F-R17：`eco_gate_pass` 的**适用域**必须随数据走 ----
+            # 该门判据含 `last >= 10000` 硬编码（为 60k 批定义）⇒ **短程批恒 False**。
+            # 缺适用域说明时，短程批的 False 会被误读成"生态崩溃"（本人 2026-09-15 实测踩到）。
+            "eco_gate_scope": f"{args.ticks} tick 批",
+            "eco_gate_applicable": bool(args.ticks >= 10000),
             "born_total": int(e.total_born), "died_total": int(e.total_died),
             "deaths_by_cause": dc,
             # D-16：终局判据值（区制分层用：饱和封顶 vs 捕食主导）
