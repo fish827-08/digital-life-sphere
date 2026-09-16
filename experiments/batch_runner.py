@@ -311,18 +311,23 @@ PRESETS = {
     #   `_rerun_logs/snap/` 会**静默从 D-24 的 60k 快照续跑**（循环体为空 ⇒ 空产出）
     #   ⇒ 三段**一律**指定专属 `snapshot-dir=_rerun_logs/cstep_snap`（2026-09-16 立）。
     # C1a：仪器侧三条臂（处理 / 配对基线 / G-A 对照端点）⇒ 判 Q1（ratio 域内迁移性）
+    # ⚠️ `donation` 必须放在**变体**里（不能进 `fixed`）：`a4` 对「非 oracle 臂收到
+    #    oracle 专属参数」**硬失败**（防静默传参）⇒ `fixed` 里的 donation 会让 `zero` 臂
+    #    rc≠0、无产出（2026-09-16 首跑实测：18 run 只起了 12 个）。
     "cstep1a": dict(
         script="experiments/a4_verify_capacity.py",
         grid=["seed=42,43,44,45,46,47"],
-        fixed=["mode=on", "donation=1.0", "ticks=60000", "max-count=3240",
+        fixed=["mode=on", "ticks=60000", "max-count=3240",
                "snapshot-every=5000", "snapshot-dir=_rerun_logs/cstep_snap"],
         template=None,
         variants=[
             dict(name="oracle_m1.3",
-                 args=["arm=oracle", "gain-multiplier=1.3", "calibration-arm"],
+                 args=["arm=oracle", "donation=1.0", "gain-multiplier=1.3",
+                       "calibration-arm"],
                  template="_rerun_logs/cstep1a/oracle_m1.3_s{seed}.csv"),
             dict(name="oracle_m1.0",
-                 args=["arm=oracle", "gain-multiplier=1.0", "calibration-arm"],
+                 args=["arm=oracle", "donation=1.0", "gain-multiplier=1.0",
+                       "calibration-arm"],
                  template="_rerun_logs/cstep1a/oracle_m1.0_s{seed}.csv"),
             dict(name="zero",
                  args=["arm=zero"],
@@ -330,10 +335,11 @@ PRESETS = {
         ],
     ),
     # C1b：科学臂（4 机制全开，m=1.0）⇒ 判 Q3/Q4（ρ 簇级 + 六门）
+    # ⚠️ 同上：`main` 臂**不得**带 `donation`（非 oracle 臂 ⇒ a4 硬拒）。
     "cstep1b": dict(
         script="experiments/a4_verify_capacity.py",
         grid=["seed=42,43,44,45,46,47"],
-        fixed=["mode=on", "arm=main", "donation=1.0", "ticks=60000",
+        fixed=["mode=on", "arm=main", "ticks=60000",
                "max-count=3240", "snapshot-every=5000",
                "snapshot-dir=_rerun_logs/cstep_snap"],
         template="_rerun_logs/cstep1b/main_s{seed}.csv",
@@ -349,6 +355,59 @@ PRESETS = {
         template="_rerun_logs/cstep2rand/rand_m1.3_s{seed}.csv",
     ),
 }
+
+
+# ---------------------------------------------------------------- 单实例锁
+# 🔴 2026-09-16 实测事故：本环境**带副作用的命令会被执行两次**，`--preset cstep1a`
+#   因此起了**两个 batch_runner 实例**（24 个子进程写同一批 CSV/快照）⇒ 数据不可信。
+#   ⇒ 加进程锁：同一时刻只允许一个批跑器（陈旧锁按 PID 存活判定自动接管）。
+LOCK_PATH = ROOT / "_rerun_logs" / ".batch_runner.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    """PID 是否存活（零依赖；Windows 用 OpenProcess，POSIX 用信号 0）。"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))       # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        k32.CloseHandle(h)
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def acquire_lock(preset: str, label: str = "", force: bool = False) -> str | None:
+    """抢占单实例锁。成功返回 None；被占用则返回**占用描述**（调用方打印并退出）。"""
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK_PATH.exists():
+        try:
+            info = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+            pid = int(info.get("pid", -1))
+        except Exception:
+            info, pid = {}, -1
+        if _pid_alive(pid) and not force:
+            return (f"已有实例在跑（pid={pid}，preset={info.get('preset')!r}，"
+                    f"起于 {info.get('started')}）—— **同一时刻只允许一个批跑器**；"
+                    f"如确认已死可用 --force-lock 接管")
+    LOCK_PATH.write_text(json.dumps(
+        {"pid": os.getpid(), "preset": preset, "label": label,
+         "started": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False),
+        encoding="utf-8")
+    return None
+
+
+def release_lock() -> None:
+    try:
+        LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
 
 
 # ---------------------------------------------------------------- 调度
@@ -533,6 +592,8 @@ def main() -> int:
     ap.add_argument("--skip-existing", action="store_true",
                     help="已有合法 summary 的 run 直接跳过（断点续批）")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force-lock", action="store_true",
+                    help="忽略已有锁（仅当确认持有者进程已死时使用）")
     ap.add_argument("--no-summarize", action="store_true")
     args = ap.parse_args()
 
@@ -571,8 +632,18 @@ def main() -> int:
           f" | 内存 {avail:.2f}/{total:.2f} GB 可用（负载 {load}%）"
           f" | 守卫阈值 留 {args.reserve_gb:.1f} GB + {args.per_run_gb:.2f} GB/run")
 
-    rc = run_batch(runs, conc, args.retries, py, workdir,
-                   args.per_run_gb, args.reserve_gb, args.dry_run)
+    if not args.dry_run:                      # 真跑才上锁（dry-run 无副作用）
+        hold = acquire_lock(args.preset or "<ad-hoc>", label=args.out_template or "",
+                            force=args.force_lock)
+        if hold:
+            print(f"❌ 拒绝启动：{hold}")
+            return 3
+    try:
+        rc = run_batch(runs, conc, args.retries, py, workdir,
+                       args.per_run_gb, args.reserve_gb, args.dry_run)
+    finally:
+        if not args.dry_run:
+            release_lock()
 
     if not args.no_summarize and not args.dry_run:
         outdir = runs[0].out.parent

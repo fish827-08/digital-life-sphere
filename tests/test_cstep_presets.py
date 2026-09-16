@@ -112,10 +112,17 @@ def test_cstep_snapshot_names_do_not_collide_with_d24_default_dir():
 
 @pytest.mark.parametrize("name", CSTEP)
 def test_cstep_common_protocol_values(name):
-    """共同口径：60k / max_count=3240（R41）/ donation=1.0 / 每 5000 快照。"""
+    """共同口径：60k / max_count=3240（R41）/ 每 5000 快照 / mode=on。
+
+    `donation=1.0` **只对 oracle 臂**断言 —— 非 oracle 臂带它会触发 a4 硬拒
+    （2026-09-16 首跑实测：18 run 只起了 12 个），故必须分开。
+    """
     for r in br.preset_runs(name, Path(".")):
         assert _flag(r.cmd, "--ticks") == "60000"
         assert _flag(r.cmd, "--max-count") == "3240"
-        assert _flag(r.cmd, "--donation") == "1.0"
         assert _flag(r.cmd, "--snapshot-every") == "5000"
         assert _flag(r.cmd, "--mode") == "on"
+        if _flag(r.cmd, "--arm") == "oracle":
+            assert _flag(r.cmd, "--donation") == "1.0"
+        else:
+            assert "--donation" not in r.cmd
