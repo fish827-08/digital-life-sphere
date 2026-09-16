@@ -358,9 +358,19 @@ PRESETS = {
 
 
 # ---------------------------------------------------------------- 单实例锁
-# 🔴 2026-09-16 实测事故：本环境**带副作用的命令会被执行两次**，`--preset cstep1a`
-#   因此起了**两个 batch_runner 实例**（24 个子进程写同一批 CSV/快照）⇒ 数据不可信。
-#   ⇒ 加进程锁：同一时刻只允许一个批跑器（陈旧锁按 PID 存活判定自动接管）。
+# 🔴 2026-09-16 事故与**根因更正**（内评 22:29 补录，实测 CPU/EXE 证据）：
+#   · **首跑真实事故 = 参数归属错**：`donation` 放在 preset 的 `fixed` ⇒ 套给 `zero` 臂
+#     ⇒ a4 硬拒 ⇒ 18 run 只起 12 个（已由 `a6b96a9` 修正；现场无数据损坏）。
+#   · ⚠️ **更正我原先的表述**：「26 个进程 = 两个 batch_runner 实例」**是错的** ——
+#     `.venv\Scripts\python.exe` 是**重定向器 stub**，以同一 argv 派生真实解释器并等待
+#     ⇒ **每次调用天然产生两个同名进程（父=子）**。实测：36 个 a4 进程中 18 个 CPU≈0、
+#     18 个 CPU≈382–439 s；总 CPU 7199.8 s ÷ 墙钟 447 s = **16.1 核** ⇒ **18 份仿真、非 36 份**。
+#   ⇒ **纪律（已入 `AGENT.md` §10.5）：进程计数不可作为"重复执行"的证据；判真伪须看 CPU 时间 / EXE 路径。**
+#   · 环境**确有**偶发重复执行（实测：板追加被双写、补丁脚本被重放）——但那是 harness 层现象，
+#     与进程计数无关，也不是本次 C1a 的事故原因。
+#   ⇒ 本锁的威胁模型 = **防"同一批被两个启动器同时推进"**（对 C1b/C2 的启动窗口有效）。
+LOCK_NOTE = ("威胁模型：防同时启动的两个批跑器（偶发重复执行 ⇒ 双写同一批产出）；"
+             "**不防**陈旧锁（陈旧用 PID 判活自动接管）。")
 LOCK_PATH = ROOT / "_rerun_logs" / ".batch_runner.lock"
 
 
@@ -386,20 +396,45 @@ def _pid_alive(pid: int) -> bool:
 def acquire_lock(preset: str, label: str = "", force: bool = False) -> str | None:
     """抢占单实例锁。成功返回 None；被占用则返回**占用描述**（调用方打印并退出）。"""
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if LOCK_PATH.exists():
+    payload = json.dumps(
+        {"pid": os.getpid(), "preset": preset, "label": label,
+         "started": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False)
+
+    def _read_holder() -> tuple[dict, int]:
         try:
             info = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
-            pid = int(info.get("pid", -1))
+            return info, int(info.get("pid", -1))
         except Exception:
-            info, pid = {}, -1
-        if _pid_alive(pid) and not force:
+            return {}, -1
+
+    if force:                                # 显式接管：直接覆盖
+        LOCK_PATH.write_text(payload, encoding="utf-8")
+        return None
+
+    # 🔴 R110 §三：**原子抢占**（`O_CREAT|O_EXCL`）—— 原实现是"先查后写"，
+    # 两个**同一秒启动**的实例可同时通过存在性检查（而"命令被执行两次"的时序特征
+    # 恰恰是同时启动）⇒ 锁与威胁模型不匹配（内评 22:29 §三 实测指出）。
+    try:
+        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        info, pid = _read_holder()
+        if _pid_alive(pid):
             return (f"已有实例在跑（pid={pid}，preset={info.get('preset')!r}，"
                     f"起于 {info.get('started')}）—— **同一时刻只允许一个批跑器**；"
                     f"如确认已死可用 --force-lock 接管")
-    LOCK_PATH.write_text(json.dumps(
-        {"pid": os.getpid(), "preset": preset, "label": label,
-         "started": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False),
-        encoding="utf-8")
+        # 陈旧锁（持有者已死）⇒ 接管：原子替换
+        try:
+            LOCK_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            info, pid = _read_holder()       # 竞争中输了 ⇒ 如实报告
+            return (f"已有实例在跑（pid={pid}，preset={info.get('preset')!r}）"
+                    f"—— 竞争接管失败，请重试或确认后 --force-lock")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(payload)
     return None
 
 
