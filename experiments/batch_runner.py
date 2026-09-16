@@ -158,9 +158,25 @@ def summary_ok(p: Path) -> bool:
         return False
 
 
+def cli_flag(key: str) -> str:
+    """preset/网格的**参数名 → CLI 开关**（F-R21）。
+
+    🔴 **F-R21（2026-09-16，R108 立号）**：`r97cal` preset 的网格键写作 `gain_multiplier`
+    （下划线，Python 风格），而 `expand()` 原来直接拼 `--{key}` ⇒ 生成 `--gain_multiplier`，
+    但 `argparse` 注册的是 `--gain-multiplier` ⇒ **参数不被识别**，云端只能绕行 shell 执行
+    （无数据损失，但 preset 事实上不可直接跑）。
+    ⇒ 统一规则：**grid/fixed 的键一律用下划线写法**（便于做 `template.format()` 占位符），
+    **拼 CLI 时把 `_` 换成 `-`**。`template` 仍用**原始键**（下划线）作占位符 ⇒ 旧模板不受影响。
+    """
+    return "--" + key.replace("_", "-")
+
+
 def expand(grid: list[str], fixed: list[str], template: str, script: str,
            workdir: Path) -> list[Run]:
-    """笛卡尔积展开网格 → Run 列表。"""
+    """笛卡尔积展开网格 → Run 列表。
+
+    键名规则见 `cli_flag()`：**键用下划线、CLI 用短横线**（F-R21）。
+    """
     g: dict[str, list[str]] = {}
     for item in grid:
         k, _, vs = item.partition("=")
@@ -182,9 +198,9 @@ def expand(grid: list[str], fixed: list[str], template: str, script: str,
         out = workdir / out_rel
         args = [script, "--out", out_rel]
         for k in keys:                       # 网格参数在 out 模板里用到，也传给脚本
-            args += [f"--{k}", c[k]]
+            args += [cli_flag(k), c[k]]
         for k, v in fixed_pairs:
-            args.append(f"--{k}")
+            args.append(cli_flag(k))         # F-R21：`_` → `-`（argparse 只认短横线）
             if v:
                 args.append(v)
         runs.append(Run(
