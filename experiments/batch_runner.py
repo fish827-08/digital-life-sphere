@@ -171,11 +171,23 @@ def cli_flag(key: str) -> str:
     return "--" + key.replace("_", "-")
 
 
-def expand(grid: list[str], fixed: list[str], template: str, script: str,
-           workdir: Path) -> list[Run]:
+def expand(grid: list[str], fixed: list[str], template: str | None, script: str,
+           workdir: Path, variants: list[dict] | None = None) -> list[Run]:
     """笛卡尔积展开网格 → Run 列表。
 
     键名规则见 `cli_flag()`：**键用下划线、CLI 用短横线**（F-R21）。
+
+    `variants`（R109 §五 新增，可空）
+    --------------------------------
+    一个批里要跑**参数互异的多条臂**时（如 C 步 `oracle_m1.3` / `oracle_m1.0` / `zero`），
+    单靠 `grid` 的笛卡尔积表达不了"每个取值配一组不同开关"。`variants` 即为此：
+    每项 = `{"name": str, "args": [str, ...], "template": str}`，最终展开为
+    **`variants × combos`**，各变体自带 `--out` 模板。
+
+    🔴 **快照目录隔离（血泪教训）**：`--snapshot-dir` 若沿用默认 `_rerun_logs/snap/`，
+    而新批的 run 名与**历史批**重名（如 `zero_s42` / `main_s42` 与 D-24 同名），
+    引擎会**静默从旧快照"续跑"**（`--ticks` 小于已跑 tick 时循环体为空 ⇒ 空产出、假失败）。
+    ⇒ 故新批一律显式给**专属快照目录**；本函数不代管，由 preset 的 `fixed` 指定。
     """
     g: dict[str, list[str]] = {}
     for item in grid:
@@ -192,24 +204,48 @@ def expand(grid: list[str], fixed: list[str], template: str, script: str,
         k, sep, v = item.partition("=")
         fixed_pairs.append((k.strip(), v.strip() if sep else ""))
 
+    # ---- 变体归一：无 variants ⇒ 单一"空变体"（保持旧行为逐位不变）----
+    norm_variants: list[dict] = [{"name": None, "pairs": [], "template": template}]
+    if variants:
+        norm_variants = []
+        for v in variants:
+            vp: list[tuple[str, str]] = []
+            for item in v.get("args", []):
+                k, sep, val = item.partition("=")
+                vp.append((k.strip(), val.strip() if sep else ""))
+            norm_variants.append({"name": v.get("name"), "pairs": vp,
+                                  "template": v["template"]})
+
     runs: list[Run] = []
-    for c in combos:
-        out_rel = template.format(**c)
-        out = workdir / out_rel
-        args = [script, "--out", out_rel]
-        for k in keys:                       # 网格参数在 out 模板里用到，也传给脚本
-            args += [cli_flag(k), c[k]]
-        for k, v in fixed_pairs:
-            args.append(cli_flag(k))         # F-R21：`_` → `-`（argparse 只认短横线）
-            if v:
-                args.append(v)
-        runs.append(Run(
-            name=Path(out_rel).stem,
-            cmd=args,
-            out=out,
-            summary=out.with_suffix(".summary.json"),
-        ))
+    for var in norm_variants:
+        for c in combos:
+            out_rel = var["template"].format(**c)
+            out = workdir / out_rel
+            args = [script, "--out", out_rel]
+            for k in keys:                   # 网格参数在 out 模板里用到，也传给脚本
+                args += [cli_flag(k), c[k]]
+            for k, val in fixed_pairs:
+                args.append(cli_flag(k))     # F-R21：`_` → `-`（argparse 只认短横线）
+                if val:
+                    args.append(val)
+            for k, val in var["pairs"]:      # 变体专属开关（同一键可被变体覆盖）
+                args.append(cli_flag(k))
+                if val:
+                    args.append(val)
+            runs.append(Run(
+                name=Path(out_rel).stem,
+                cmd=args,
+                out=out,
+                summary=out.with_suffix(".summary.json"),
+            ))
     return runs
+
+
+def preset_runs(name: str, workdir: Path = Path(".")) -> list[Run]:
+    """按 preset 名展开 run 列表（**CLI 与测试共用**，保证测的就是跑的那条路径）。"""
+    p = PRESETS[name]
+    return expand(p["grid"], p["fixed"], p.get("template"), p["script"],
+                  workdir, p.get("variants"))
 
 
 PRESETS = {
@@ -267,6 +303,50 @@ PRESETS = {
                "max-count=3240", "snapshot-every=0", "calibration-arm",
                "gain-multiplier=1.3", "signal-mode=random"],
         template="_rerun_logs/r97cal/rand_m1.3_s{seed}.csv",
+    ),
+    # ==================== R109 §五：C 步（本地直通车）三段 ====================
+    # 共同口径：60k tick（R3 生态门本义适用）/ max_count=3240（R41 ⑤ 不饱和前提）/
+    #   donation=1.0 / 快照每 5000 原地覆盖。
+    # 🔴 **快照目录隔离**：`zero_s42` / `main_s42` 与 **D-24 批同名**，若沿用默认
+    #   `_rerun_logs/snap/` 会**静默从 D-24 的 60k 快照续跑**（循环体为空 ⇒ 空产出）
+    #   ⇒ 三段**一律**指定专属 `snapshot-dir=_rerun_logs/cstep_snap`（2026-09-16 立）。
+    # C1a：仪器侧三条臂（处理 / 配对基线 / G-A 对照端点）⇒ 判 Q1（ratio 域内迁移性）
+    "cstep1a": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "donation=1.0", "ticks=60000", "max-count=3240",
+               "snapshot-every=5000", "snapshot-dir=_rerun_logs/cstep_snap"],
+        template=None,
+        variants=[
+            dict(name="oracle_m1.3",
+                 args=["arm=oracle", "gain-multiplier=1.3", "calibration-arm"],
+                 template="_rerun_logs/cstep1a/oracle_m1.3_s{seed}.csv"),
+            dict(name="oracle_m1.0",
+                 args=["arm=oracle", "gain-multiplier=1.0", "calibration-arm"],
+                 template="_rerun_logs/cstep1a/oracle_m1.0_s{seed}.csv"),
+            dict(name="zero",
+                 args=["arm=zero"],
+                 template="_rerun_logs/cstep1a/zero_s{seed}.csv"),
+        ],
+    ),
+    # C1b：科学臂（4 机制全开，m=1.0）⇒ 判 Q3/Q4（ρ 簇级 + 六门）
+    "cstep1b": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "donation=1.0", "ticks=60000",
+               "max-count=3240", "snapshot-every=5000",
+               "snapshot-dir=_rerun_logs/cstep_snap"],
+        template="_rerun_logs/cstep1b/main_s{seed}.csv",
+    ),
+    # C2：条件 7 随机信号对照（同档 m=1.3 + signal_mode=random）⇒ 机制归因专项
+    "cstep2rand": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=oracle", "donation=1.0", "ticks=60000",
+               "max-count=3240", "snapshot-every=5000",
+               "snapshot-dir=_rerun_logs/cstep_snap",
+               "gain-multiplier=1.3", "calibration-arm", "signal-mode=random"],
+        template="_rerun_logs/cstep2rand/rand_m1.3_s{seed}.csv",
     ),
 }
 
@@ -461,7 +541,8 @@ def main() -> int:
         args.script = p["script"]
         args.grid = p["grid"]
         args.fixed = p["fixed"]
-        args.out_template = p["template"]
+        args.out_template = p.get("template")
+        args.variants = p.get("variants")
     if not args.grid:
         print("错误：需要 --grid 或 --preset")
         return 2
@@ -473,7 +554,8 @@ def main() -> int:
     if not os.path.exists(py):
         py = sys.executable
 
-    runs = expand(args.grid, args.fixed, args.out_template, args.script, workdir)
+    runs = expand(args.grid, args.fixed, args.out_template, args.script, workdir,
+                  getattr(args, "variants", None))
     for r in runs:                      # 产出目录可能与 workdir 不同（如 workdir=_wt_r19）
         r.out.parent.mkdir(parents=True, exist_ok=True)
     if args.skip_existing:

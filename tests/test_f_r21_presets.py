@@ -78,7 +78,7 @@ def test_expand_grid_values_are_passed_positionally_after_flag():
 def test_preset_cli_flags_are_all_accepted_by_target_script(name):
     """🔴 **全 preset 排查**（机器化）：每个 `--flag` 都必须在目标脚本 `--help` 里出现。"""
     p = br.PRESETS[name]
-    runs = br.expand(p["grid"], p["fixed"], p["template"], p["script"], Path("."))
+    runs = br.preset_runs(name, Path("."))
     assert runs, f"{name}: 未展开出任何 run"
     valid = _script_flags(p["script"])
     bad: set[str] = set()
@@ -92,11 +92,47 @@ def test_preset_cli_flags_are_all_accepted_by_target_script(name):
     )
 
 
+# 已执行完毕的**历史批**（其数据已在数据仓、且 run 名未与更早批次冲突）⇒ 不追溯本守卫。
+# 本守卫自 2026-09-16（C 步）起对**新 preset 强制**。
+LEGACY_PRESETS = {"r19", "d24", "d27dose", "d27recv", "r97cal", "r97cal_rand"}
+
+
+@pytest.mark.parametrize("name", sorted(br.PRESETS))
+def test_preset_shares_no_snapshot_dir_with_other_names(name):
+    """🔴 **快照目录隔离守卫**：凡写快照的**新** preset 必须显式给 `--snapshot-dir`。
+
+    理由（本项目真实事故型）：默认目录 `_rerun_logs/snap/` 下，run 名一旦与**历史批**重名
+    （如 C 步的 `zero_s42` / `main_s42` 与 D-24 同名），引擎会**静默从旧快照续跑** ——
+    `--ticks` 小于已跑 tick 时循环体为空 ⇒ 空产出、假失败（我在 preflight 首跑亲历过）。
+    """
+    if name in LEGACY_PRESETS:
+        pytest.skip(f"{name}: 历史批（不追溯）")
+    p = br.PRESETS[name]
+    writes_snap = any(a.split("=")[0] == "snapshot-every" and a.split("=")[-1] != "0"
+                      for a in p["fixed"])
+    if not writes_snap:
+        return
+    dirs = [a.split("=", 1)[1] for a in p["fixed"] if a.startswith("snapshot-dir=")]
+    assert dirs, (f"{name}: 写快照却未指定 `--snapshot-dir` ⇒ 会与历史批共用默认目录，"
+                  f"存在静默续跑风险")
+    assert dirs[0] != "_rerun_logs/snap", f"{name}: 不得使用默认快照目录（重名风险）"
+
+
 def test_all_presets_have_required_keys():
-    """结构自检：每个 preset 必备 4 键（防手写 preset 漏字段 ⇒ 展开时 KeyError）。"""
+    """结构自检：每个 preset 必备键（`template` 可用 `variants` 代替）。
+
+    防手写 preset 漏字段 ⇒ 展开时 KeyError / 静默少跑。
+    """
     for name, p in br.PRESETS.items():
-        assert {"script", "grid", "fixed", "template"} <= set(p), f"{name} 缺键"
+        assert {"script", "grid", "fixed"} <= set(p), f"{name} 缺键"
         assert isinstance(p["grid"], list) and p["grid"], f"{name}: grid 须非空 list"
+        assert p.get("template") or p.get("variants"), \
+            f"{name}: 须有 template 或 variants（否则无处取 --out 模板）"
+        if p.get("variants"):
+            for v in p["variants"]:
+                assert {"name", "args", "template"} <= set(v), f"{name}: variant 缺键"
+                assert v["template"].count("{seed}") == 1, \
+                    f"{name}/{v['name']}: 变体模板须含 {{seed}}"
 
 
 def test_r97cal_preset_is_now_runnable_shape():

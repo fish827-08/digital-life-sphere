@@ -298,7 +298,21 @@ def _load_summary(p: Path) -> dict | None:
 
 
 def run_matrix(arms: list[str], seeds: list[int], ticks: int, max_count: int,
-               workdir: Path, python: str) -> None:
+               workdir: Path, python: str, extra: list[str] | None = None,
+               extra_oracle: list[str] | None = None) -> None:
+    """跑短程矩阵供 C3/C4/C5 复核。
+
+    `extra`（2026-09-16 新增）：**镜像真实批次配置**的附加开关（`key=value` 或裸 flag），
+    套用到**所有臂**（如 `donation=1.0`）。
+    `extra_oracle`：**仅套用到 `--arm oracle`** 的开关（如 `gain-multiplier=1.3`、`calibration-arm`）。
+    🔴 为何要分两组：`a4` 对「非 oracle 臂收到 oracle 专属参数」**硬失败**（防静默传参，
+    F-R18 同族守卫）—— 实测（C 步预检第二跑）把 `donation` 套给 `zero`/`main` ⇒
+    这两类臂 rc≠0、无 summary ⇒ 预检报 6 项"缺 summary"**假失败**。故必须分组。
+    🔴 必要性：预检若不带批次的真实配置，就会在**错的配置上**做断言 ——
+    实测（C 步预检首跑）：oracle 臂未带 `donation` ⇒ 落到默认 `0.05 < SIGNAL_COST 0.1`
+    ⇒ C5 报「保本语义不可达」3 项 ⇒ **假失败**（该缺陷是 D-24 的历史根因，但**不是本批的配置**）。
+    键名规则同 F-R21：**写 `_`、CLI 用 `-`**。
+    """
     workdir.mkdir(parents=True, exist_ok=True)
     # ⚠️ 本工具自身的静默事故教训（2026-09-14 实跑发现）：
     #   默认快照目录 `_rerun_logs/snap/` 里已有同名 run 的快照（如 D-24 的 main_s42.snapshot.npz），
@@ -316,6 +330,12 @@ def run_matrix(arms: list[str], seeds: list[int], ticks: int, max_count: int,
                    "--ticks", str(ticks), "--max-count", str(max_count),
                    "--snapshot-every", "0", "--fresh",
                    "--snapshot-dir", str(snap_dir), "--out", str(out)]
+            _extras = list(extra or []) + (list(extra_oracle or []) if arm == "oracle" else [])
+            for item in _extras:                 # 镜像批次配置（键名 `_`→`-`，同 F-R21）
+                k, sep, val = item.partition("=")
+                cmd.append("--" + k.strip().replace("_", "-"))
+                if sep and val.strip():
+                    cmd.append(val.strip())
             t0 = time.time()
             rc = subprocess.call(cmd, cwd=str(ROOT),
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -339,6 +359,12 @@ def main() -> int:
     ap.add_argument("--ticks", type=int, default=3000,
                     help="短跑 tick 数；≥3000 才有 ≥3 个采样点，C3 差异断言才有判别力")
     ap.add_argument("--max-count", type=int, default=3240)
+    ap.add_argument("--extra", nargs="*", default=[],
+                    help="镜像批次配置的附加开关，**套用到所有臂**（如 donation=1.0）；"
+                         "键名写 `_`，CLI 自动转 `-`（F-R21）")
+    ap.add_argument("--extra-oracle", nargs="*", default=[],
+                    help="**仅套用到 oracle 臂**的开关（如 gain-multiplier=1.3 calibration-arm）；"
+                         "a4 会硬拒非 oracle 臂收到这些参数 ⇒ 必须分组传")
     ap.add_argument("--workdir", default="_rerun_logs/preflight")
     ap.add_argument("--python", default=None)
     ap.add_argument("--readback-only", action="store_true",
@@ -358,7 +384,8 @@ def main() -> int:
           f"| max_count={args.max_count} | 目录={wd}")
     if not args.readback_only:
         print("① 跑矩阵：")
-        run_matrix(arms, seeds, args.ticks, args.max_count, wd, py)
+        run_matrix(arms, seeds, args.ticks, args.max_count, wd, py, args.extra,
+                   args.extra_oracle)
 
     failures: list[str] = []
     report: list[str] = ["# Pre-Flight 检查报告", "",
