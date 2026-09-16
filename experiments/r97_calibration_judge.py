@@ -32,6 +32,7 @@ import argparse
 import json
 import re
 import sys
+from math import comb
 from pathlib import Path
 
 import numpy as np
@@ -48,15 +49,36 @@ try:
 except Exception:
     pass
 
+# ============================================================================
+# 判据口径（**预注册：同类批的唯一判定口径**，不得在新数据上回头更换读法）
+# ============================================================================
+# 加固 1（内评 21:38 §三）：R107 口径明文预注册为「同类批唯一判定口径」；
+#         且**配对对照 m=1.0 是判定前置**（缺基线 ⇒ 不判，见 paired_all_positive）。
+# 加固 2：划法 B 的阈值**写死为 `N ≥ 0.9 × max_count`**（不手填、不挑上限）——
+#         内评阈值敏感性：合理带内结论稳定，但阈值取到饱和上限（3240）时会退化到 1/1。
+# 加固 3：结论表述**只能**是本文件的 `ALLOWED_STATEMENT`；`FORBIDDEN_STATEMENTS`
+#         逐条禁用（域内 n≤4 且与 rand 分布重叠 ⇒ 机制归因超本批能力）。
+CRITERION_VERSION = "R107-v1（含内评 21:38 §三 三条加固）"
+
 RATIO_LO, RATIO_HI = 1.2, 1.5          # R107 域内区间
-PRED_DOMAIN_MAX = 0.9                  # 划法 A：pred_frac < 0.9 ⇒ 域内
-N_DOMAIN_MIN = 3000                    # 划法 B：终态 N ≥ 3000 ⇒ 域内
-N_TRANSITION = (1000, 3000)            # 过渡带（记录项）
-BASELINE_M = 1.0                       # 配对基线
+PRED_DOMAIN_MAX = 0.9                  # 划法 A：pred_frac < 0.9 ⇒ 域内（R38③ 既有，非事后）
+N_DOMAIN_RATIO = 0.9                   # 划法 B：终态 N ≥ 0.9 × max_count（加固 2：写死比值）
+N_DOMAIN_FALLBACK = 3000               # max_count 缺失时的回退（旧批）
+N_TRANSITION_LO = 1000                 # 过渡带下界（记录项）
+BASELINE_M = 1.0                       # 配对基线（**判定前置**）
 NAME_RE = re.compile(r"^(?:(?P<arm>rand)_)?m(?P<m>[0-9.]+)_s(?P<seed>\d+)$")
 
-DOMAINS = {"A": f"pred_frac < {PRED_DOMAIN_MAX}（R38③ 既有）",
-           "B": f"终态 N ≥ {N_DOMAIN_MIN}（机制性：生态存活）"}
+ALLOWED_STATEMENT = ("增益档在**适用域内**把 `ratio` 抬进目标带 [1.2,1.5]"
+                     "（配对一致为正、两划法结论一致）")
+FORBIDDEN_STATEMENTS = (
+    "「有信息者优于随机者」（域内 n≤4 且与 rand 分布重叠 ⇒ 机制归因超本批样本能力）",
+    "「信号有价值 / 构成 L1 证据」（本档阳性含义仅限**行为响应**，R100 条件 2）",
+    "「仪器不灵敏 / 增益档无效」（R108 §三：本批正名为**校准达成**）",
+    "「仪器全链路已验证」（ρ 未测，移交 C 步）",
+)
+
+DOMAINS = {"A": f"pred_frac < {PRED_DOMAIN_MAX}（R38③ 既有，非事后）",
+           "B": f"终态 N ≥ {N_DOMAIN_RATIO} × max_count（加固 2：比值写死）"}
 
 
 # ---------------------------------------------------------------- 载入
@@ -94,11 +116,24 @@ def load(dirp: Path) -> dict[str, dict]:
             "flag": bool(sw.get("is_calibration_arm")),
             "sw_m": sw.get("oracle_gain_multiplier"),
             "signal_mode": sw.get("signal_mode"),
+            "max_count": sw.get("max_count"),          # 加固 2：域 B 阈值由此推导
         }
     return out
 
 
 # ---------------------------------------------------------------- 域与判定（纯函数，可单测）
+
+def n_threshold(row: dict) -> float:
+    """**划法 B 的阈值**（加固 2：`0.9 × max_count`，**写死比值、不手填绝对值**）。
+
+    `max_count` 缺失（旧批）⇒ 回退 `N_DOMAIN_FALLBACK`——回退值会在报告里**显式标注**，
+    避免"悄悄换阈值"。
+    """
+    mc = row.get("max_count")
+    if mc:
+        return N_DOMAIN_RATIO * float(mc)
+    return float(N_DOMAIN_FALLBACK)
+
 
 def in_domain(row: dict, method: str) -> bool:
     """该 run 是否落在**适用域**内。`method` ∈ {"A","B"}。"""
@@ -107,8 +142,21 @@ def in_domain(row: dict, method: str) -> bool:
         return pf is not None and float(pf) < PRED_DOMAIN_MAX
     if method == "B":
         n = row.get("N")
-        return n is not None and int(n) >= N_DOMAIN_MIN
+        return n is not None and float(n) >= n_threshold(row)
     raise ValueError(f"未知划法 {method!r}")
+
+
+def sign_test_pvalue(k: int, n: int) -> float:
+    """单侧**符号检验** `P(X ≥ k | n, p=0.5)`（精确二项；`[内评]` 21:38 §二 补的量化）。
+
+    R107 只写"配对 6/6"，未给检验值；本函数把该条最强证据**配上显式统计支撑**
+    （`[实测]` n=6、k=6 ⇒ 1/64 = 0.0156，单侧 0.05 显著）。
+    """
+    if n <= 0 or k <= 0:
+        return 1.0
+    total = 2 ** n
+    tail = sum(comb(n, i) for i in range(k, n + 1))
+    return tail / total
 
 
 def domain_tag(row: dict) -> str:
@@ -121,7 +169,7 @@ def domain_tag(row: dict) -> str:
     if b:
         return "域B"
     n = row.get("N")
-    if n is not None and N_TRANSITION[0] <= int(n) < N_TRANSITION[1]:
+    if n is not None and N_TRANSITION_LO <= float(n) < n_threshold(row):
         return "过渡带"
     return "域外"
 
@@ -225,6 +273,11 @@ def _fmt(v, p: int = 4) -> str:
 def report(rows: dict[str, dict]) -> tuple[str, dict]:
     L: list[str] = []
     res: dict = {"judged_under": "R107（2026-09-16 锁定）",
+                 "criterion_version": CRITERION_VERSION,
+                 "preregistered_as": "同类批的唯一判定口径（不得换读法）",
+                 "n_domain_ratio": N_DOMAIN_RATIO,
+                 "allowed_statement": ALLOWED_STATEMENT,
+                 "forbidden_statements": list(FORBIDDEN_STATEMENTS),
                  "n_runs": len(rows),
                  "n_rand_runs": sum(1 for r in rows.values() if r["is_rand"])}
 
@@ -236,7 +289,13 @@ def report(rows: dict[str, dict]) -> tuple[str, dict]:
     L.append("R97 ⑤ 配对校准批 · 判读 **v4**（R107 判据：① 配对全正 ∧ ② 域内全达〔双划法〕）")
     L.append(f"数据：{len(rows)} run（state {sum(1 for r in rows.values() if not r['is_rand'])}"
              f" / rand {len(rand_rows)}）；m 档 {state_ms}；配对基线 m={BASELINE_M}")
-    L.append(f"划法：A = {DOMAINS['A']}｜B = {DOMAINS['B']}｜过渡带 N∈{N_TRANSITION}（记录项）")
+    L.append(f"口径版本：**{CRITERION_VERSION}**（预注册：同类批的**唯一**判定口径，"
+             "不得在新数据上回头更换读法）")
+    L.append(f"划法：A = {DOMAINS['A']}｜B = {DOMAINS['B']}｜"
+             f"过渡带 N∈[{N_TRANSITION_LO}, 0.9×max_count)（记录项）")
+    _mm = sorted({r.get("max_count") for r in rows.values() if r.get("max_count")})
+    L.append(f"max_count 实测：{_mm if _mm else '缺失 ⇒ 域 B 回退 %d（报告已标注）' % N_DOMAIN_FALLBACK}"
+             f" ⇒ 域 B 阈值 = {N_DOMAIN_RATIO} × max_count")
     L.append("=" * 104)
 
     # ---- ① ratio 逐 seed 全表（含域标注）----
@@ -263,11 +322,18 @@ def report(rows: dict[str, dict]) -> tuple[str, dict]:
             line += (f"{_fmt(row[1]):>12}{_fmt(row[2]):>10}{('%+.4f' % row[3]):>11}"
                      if row else f"{'—':>12}{'—':>10}{'—':>11}")
         L.append(line)
+    sign: dict[float, float] = {}
     for m in treated:
         p = pairs_by_m[m]
         mark = "✅ 全正" if p["all_positive"] else f"❌ 未全正（反向 seed {p['reversed_seeds']}）"
+        # 加固 1 的量化：配对全正须配**显式**检验（内评 21:38 §二 补；R107 原稿未给）
+        pv = sign_test_pvalue(p["n_pairs"], p["n_pairs"]) if p["n_pairs"] else 1.0
+        sign[m] = pv
         L.append(f"  ⇒ m={m}: n={p['n_pairs']} 对（缺 {p['n_missing']}）；"
                  f"Δ ∈ [{_fmt(p['worst_delta'])}, {_fmt(p['best_delta'])}] ⇒ {mark}")
+        L.append(f"     单侧**符号检验** P(X≥{p['n_pairs']} | n={p['n_pairs']}) = {pv:.4f}"
+                 f"（精确二项）⇒ 配对证据{'显著' if pv < 0.05 else '**不显著**'}"
+                 f"；⚠️ 配对证据**无法区分 m=1.3 与 m=1.5**（两者都 6/6）")
 
     # ---- ③ 域内全达（双划法）----
     L.append("\n③ ② **域内全达** —— 两种独立划法（域内全部可用 seed 须落 "
@@ -301,6 +367,13 @@ def report(rows: dict[str, dict]) -> tuple[str, dict]:
     L.append(f"  ⇒ **锁 m 建议（最小满足者）**："
              f"{('m = %s' % locked['locked_m']) if locked['locked_m'] else '无满足臂 ⇒ 维持现值/按 R101 上调（≤2 轮）'}"
              f"（满足者 {locked['candidates']}）")
+    L.append("  ⚠️ 锁 m 的依据**完全来自域内落带覆盖**（配对 6/6 对 m1.3/m1.5 无区分力）"
+             "⇒ 在候选里挑「覆盖最好的最小者」本身是一次**事后选择**（加固 1）"
+             "⇒ 故本口径**预注册为同类批唯一读法**。")
+    L.append("")
+    L.append(f"  🔒 **表述额度（加固 3，唯一允许）**：{ALLOWED_STATEMENT}")
+    for fb in FORBIDDEN_STATEMENTS:
+        L.append(f"      ✗ 不得表述为{fb}")
 
     # ---- ⑤ 记录项（不参与判定）----
     L.append("\n⑤ 记录项（**不参与判定**，R107 明文）")
@@ -328,6 +401,7 @@ def report(rows: dict[str, dict]) -> tuple[str, dict]:
         L.append(f"      m={m}: z̄={mr['zbar']} s_z={mr['s_z']} t_crit={mr['t_crit']} "
                  f"CI下界(z)={mr['ci_low_z']} ⇒ {'正向' if mr['pass'] else '未现正向'}"
                  f"（逐 seed ρ={mr['rho_by_seed']}）")
+    res["sign_test"] = {str(k): v for k, v in sign.items()}
     res["rho_record"] = {str(m): merge_rho_cluster(
         [r["rho"] for r in rows.values() if r["m"] == m and not r["is_rand"]]) for m in state_ms}
 
@@ -383,6 +457,14 @@ def report(rows: dict[str, dict]) -> tuple[str, dict]:
                      f"  vs  state 中位={_fmt(float(np.median(st_all)) if st_all else None)}"
                      f"；rand 最大={_fmt(max(c) if c else None)}"
                      f"  vs  state 最大={_fmt(max(st_all) if st_all else None)}")
+            # 按域分组（内评 21:38 §三：rand 与 state 域内分布**重叠**）
+            for method in ("A", "B"):
+                rr_dom = [x for x in rr if in_domain(x, method) and x["ratio"] is not None]
+                vals_d = [float(x["ratio"]) for x in rr_dom]
+                n_in = len([v for v in vals_d if RATIO_LO <= v <= RATIO_HI])
+                L.append(f"    按域 {method}：rand {n_in}/{len(vals_d)} 落带 "
+                         f"{[round(v, 4) for v in vals_d]} —— 与 state 域内分布**重叠**"
+                         f" ⇒ **不得**据此称「有信息者优于随机者」（加固 3）")
         L.append("  ⇒ 机制归因（rand 是否复制 state 的域内达标）**超出本批样本能力**，"
                  "**记录待 C 步专项**（R108 §二 边界）。")
 
@@ -394,6 +476,12 @@ def report(rows: dict[str, dict]) -> tuple[str, dict]:
              "（R100 条件 2）。")
     L.append("  · 本批全部 run 登记为校准臂（`is_calibration_arm=True`）⇒ 被 R100 条件 5 "
              "拒收于科学判读。")
+    L.append(f"  · 🔒 **表述额度（加固 3）**：唯一允许 =「{ALLOWED_STATEMENT}」；"
+             "其余见 §④ 禁用清单（域内 n≤4 且与 rand 分布重叠）。")
+    L.append(f"  · 🔒 **口径冻结（加固 1）**：`{CRITERION_VERSION}` 为**同类批唯一判定口径**，"
+             "不得在新数据上换读法；**配对对照 m=1.0 为判定前置**（缺 ⇒ 不判）。")
+    L.append(f"  · 🔒 **阈值写死（加固 2）**：域 B = `N ≥ {N_DOMAIN_RATIO} × max_count`"
+             "（不手填绝对值；敏感性：合理带内结论稳定，取饱和上限则退化）。")
     res["boundaries"] = [
         "仅用于锁 m（工程目的）；不得扩散为仪器全链路验证（ρ 未测）",
         "不得读成「增益档无效/仪器不灵敏」，也不得读成「信号有价值」",

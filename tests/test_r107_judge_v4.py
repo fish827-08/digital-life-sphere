@@ -182,3 +182,105 @@ def test_report_runs_end_to_end_on_synthetic_batch(tmp_path):
     # 边界声明四句必须在（R108 §二/§三 的措辞纪律）
     assert len(res["boundaries"]) == 4
     assert any("不含 L1" in b for b in res["boundaries"])
+
+
+# ------------------------------------------------------------ 内评 21:38 §三 三条加固
+
+def test_hardening2_threshold_is_ratio_of_max_count():
+    """加固 2：域 B 阈值 = `0.9 × max_count`（**写死比值**，不许手填绝对值）。"""
+    assert j.n_threshold({"max_count": 3240}) == pytest.approx(2916.0)
+    assert j.n_threshold({"max_count": 5000}) == pytest.approx(4500.0)
+    # max_count 缺失（旧批）⇒ 显式回退常量（不得静默变 0）
+    assert j.n_threshold({}) == pytest.approx(float(j.N_DOMAIN_FALLBACK))
+
+
+def test_hardening2_domain_b_boundary_is_derived_not_hardcoded():
+    """阈值边界必须**由 max_count 推导**：N=2915 不入域、N=2916 入域（max_count=3240）。"""
+    below = dict(_row(42, 1.3, 1.25, 2915, 0.5), max_count=3240)
+    at = dict(_row(42, 1.3, 1.25, 2916, 0.5), max_count=3240)
+    assert j.in_domain(below, "B") is False
+    assert j.in_domain(at, "B") is True
+    # 同一条数据在 max_count=5000 的批里则不入域 ⇒ 证明阈值确实随批变化（非硬编码）
+    assert j.in_domain(at, "B") is True and j.in_domain(
+        dict(at, max_count=5000), "B") is False
+
+
+def test_sign_test_pvalue_matches_exact_binomial():
+    """内评 21:38 §二 补的量化：`P(X≥6|n=6)=1/64=0.015625`（精确二项，非近似）。"""
+    assert j.sign_test_pvalue(6, 6) == pytest.approx(0.015625)
+    assert j.sign_test_pvalue(5, 6) == pytest.approx(7 / 64)          # 0.109375
+    assert j.sign_test_pvalue(0, 6) == pytest.approx(1.0)
+    # 单调：要求越多全正 ⇒ p 越小
+    assert j.sign_test_pvalue(6, 8) > j.sign_test_pvalue(8, 8)
+
+
+def test_hardening1_and_3_are_present_in_report_and_json():
+    """加固 1（口径版本 + 预注册声明）与加固 3（表述额度）必须**可机器读取**。"""
+    text, res = j.report(_good_batch())
+    assert res["criterion_version"].startswith("R107-v1")
+    assert "唯一" in res["preregistered_as"]
+    assert res["allowed_statement"] == j.ALLOWED_STATEMENT
+    assert len(res["forbidden_statements"]) == 4
+    # 报告正文必须含三条加固的落点
+    for needle in ("口径版本", "表述额度", "口径冻结", "阈值写死", "为判定前置"):
+        assert needle in text, f"报告缺「{needle}」（加固未落码）"
+    # 禁用清单必须含「有信息者优于随机者」（加固 3 的核心禁令）
+    assert any("有信息者优于随机者" in f for f in res["forbidden_statements"])
+
+
+def test_report_does_not_name_removed_constant():
+    """回归：`N_TRANSITION`（旧常量）已被比值阈值取代 ⇒ 报告生成不得再引用它。"""
+    assert not hasattr(j, "N_TRANSITION")
+    assert hasattr(j, "N_TRANSITION_LO") and hasattr(j, "N_DOMAIN_RATIO")
+    j.report(_good_batch())          # 不得抛 NameError
+
+
+# ------------------------------------------------------------ 内评 21:38 §三 三条加固
+
+def test_hardening2_threshold_is_ratio_of_max_count():
+    """加固 2：域 B 阈值 = `0.9 × max_count`（**写死比值**，不许手填绝对值）。"""
+    assert j.n_threshold({"max_count": 3240}) == pytest.approx(2916.0)
+    assert j.n_threshold({"max_count": 5000}) == pytest.approx(4500.0)
+    # max_count 缺失（旧批）⇒ 显式回退常量（不得静默变 0）
+    assert j.n_threshold({}) == pytest.approx(float(j.N_DOMAIN_FALLBACK))
+
+
+def test_hardening2_domain_b_boundary_is_derived_not_hardcoded():
+    """阈值边界必须**由 max_count 推导**：N=2915 不入域、N=2916 入域（max_count=3240）。"""
+    below = dict(_row(42, 1.3, 1.25, 2915, 0.5), max_count=3240)
+    at = dict(_row(42, 1.3, 1.25, 2916, 0.5), max_count=3240)
+    assert j.in_domain(below, "B") is False
+    assert j.in_domain(at, "B") is True
+    # 同一条数据在 max_count=5000 的批里则不入域 ⇒ 证明阈值确实随批变化（非硬编码）
+    assert j.in_domain(at, "B") is True and j.in_domain(
+        dict(at, max_count=5000), "B") is False
+
+
+def test_sign_test_pvalue_matches_exact_binomial():
+    """内评 21:38 §二 补的量化：`P(X≥6|n=6)=1/64=0.015625`（精确二项，非近似）。"""
+    assert j.sign_test_pvalue(6, 6) == pytest.approx(0.015625)
+    assert j.sign_test_pvalue(5, 6) == pytest.approx(7 / 64)          # 0.109375
+    assert j.sign_test_pvalue(0, 6) == pytest.approx(1.0)
+    # 单调：要求越多全正 ⇒ p 越小
+    assert j.sign_test_pvalue(6, 8) > j.sign_test_pvalue(8, 8)
+
+
+def test_hardening1_and_3_are_present_in_report_and_json():
+    """加固 1（口径版本 + 预注册声明）与加固 3（表述额度）必须**可机器读取**。"""
+    text, res = j.report(_good_batch())
+    assert res["criterion_version"].startswith("R107-v1")
+    assert "唯一" in res["preregistered_as"]
+    assert res["allowed_statement"] == j.ALLOWED_STATEMENT
+    assert len(res["forbidden_statements"]) == 4
+    # 报告正文必须含三条加固的落点
+    for needle in ("口径版本", "表述额度", "口径冻结", "阈值写死", "为判定前置"):
+        assert needle in text, f"报告缺「{needle}」（加固未落码）"
+    # 禁用清单必须含「有信息者优于随机者」（加固 3 的核心禁令）
+    assert any("有信息者优于随机者" in f for f in res["forbidden_statements"])
+
+
+def test_report_does_not_name_removed_constant():
+    """回归：`N_TRANSITION`（旧常量）已被比值阈值取代 ⇒ 报告生成不得再引用它。"""
+    assert not hasattr(j, "N_TRANSITION")
+    assert hasattr(j, "N_TRANSITION_LO") and hasattr(j, "N_DOMAIN_RATIO")
+    j.report(_good_batch())          # 不得抛 NameError
